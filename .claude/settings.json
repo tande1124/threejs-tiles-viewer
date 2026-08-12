@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx vite *)",
+      "Bash(node -e \"const m = require && null || ''; import\\('three/addons/loaders/DRACOLoader.js'\\).then\\(d => console.log\\('DRACO_GLTF_CONFIG:', typeof d.DRACO_GLTF_CONFIG, JSON.stringify\\(d.DRACO_GLTF_CONFIG\\)\\)\\)\")"
+    ]
+  }
+}
