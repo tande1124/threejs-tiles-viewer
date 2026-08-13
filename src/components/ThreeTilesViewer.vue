@@ -13,7 +13,6 @@
         <el-form-item label="经度（Longitude）">
           <el-input
             v-model="longitudeInput"
-            placeholder="例如 116.3913"
             size="large"
           />
         </el-form-item>
@@ -21,15 +20,13 @@
         <el-form-item label="纬度（Latitude）">
           <el-input
             v-model="latitudeInput"
-            placeholder="例如 39.9075"
             size="large"
           />
         </el-form-item>
 
-        <el-form-item label="高程（Height / 米）">
+        <el-form-item label="高程（Height / 米，可选）">
           <el-input
             v-model="heightInput"
-            placeholder="例如 0（椭球体高度，可为空）"
             size="large"
           />
         </el-form-item>
@@ -74,9 +71,9 @@ export default defineComponent({
     return {
       controller: null as TilesViewerController | null,
       defaultSceneConfig: getDefaultSceneConfig(),
-      longitudeInput: '',
-      latitudeInput: '',
-      heightInput: '',
+      longitudeInput: '98.348344',
+      latitudeInput: '29.65326',
+      heightInput: '2740',
       formError: '',
       isSubmittingPoint: false,
     }
@@ -132,7 +129,10 @@ export default defineComponent({
 
       const longitude = Number(this.longitudeInput)
       const latitude = Number(this.latitudeInput)
-      const height = this.heightInput.trim() ? Number(this.heightInput) : 0
+      // 高程留空时传 undefined，由控制器自动贴合到模型表面
+      const heightRaw = this.heightInput.trim()
+      const hasHeight = heightRaw !== ''
+      const height = hasHeight ? Number(heightRaw) : undefined
 
       if (!this.longitudeInput || !this.latitudeInput) {
         this.formError = '请先输入经度和纬度。'
@@ -146,8 +146,8 @@ export default defineComponent({
         this.formError = '纬度必须是 -90 到 90 之间的有效数值。'
         return
       }
-      if (!Number.isFinite(height)) {
-        this.formError = '高程必须是有效数值，可以为空（默认为 0）。'
+      if (hasHeight && !Number.isFinite(height)) {
+        this.formError = '高程必须是有效数值，也可以留空自动贴合模型表面。'
         return
       }
 

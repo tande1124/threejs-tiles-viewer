@@ -11,7 +11,6 @@ import { disposeObject3D } from '@/utils/three-dispose'
 import { createKtx2MimeTypePlugin } from '@/utils/ktx2MimeTypePlugin'
 import { lonLatHeightToEcef } from '@/utils/geo-coordinate'
 import type { TilesetSourceConfig } from '@/utils/tileset'
-import { createNoMipmapPlugin } from '@/utils/noMipmapPlugin'
 
 // ========== 常量 ==========
 
@@ -110,11 +109,11 @@ interface ManagedTilesetEntry {
  *
  * ## 清晰度策略（对标 Cesium maximumScreenSpaceError=0）
  *
- * - errorTarget=0：强制遍历到最深可用 LOD 层级
- * - pixelRatio≥2x：超采样，增大 SSE 分辨率分母推动更激进细化
- * - noMipmapPlugin：非压缩纹理始终全分辨率采样，无 mip 链降级模糊
- * - enhanceModelTextures：GPU 最大各向异性过滤 + LinearFilter
- * - 超大 LRU 缓存：消除缓存满导致的精细瓦片拒绝加载
+ * - 适度降低 errorTarget：比默认值更积极细化，但避免过度追深导致长期停留在过渡层级
+ * - pixelRatio 按设备像素比渲染：保证高分屏清晰，同时控制性能开销
+ * - 保留 mipmap 链并开启各向异性过滤：更接近 Cesium 的斜视纹理观感
+ * - 关闭 ACES Filmic：避免影调压缩带来的“发灰发糊”观感
+ * - 提高缓存和处理预算：减少精细瓦片加载抖动
  */
 export class TilesViewerController {
   // ========== Three.js 核心对象 ==========
@@ -181,6 +180,16 @@ export class TilesViewerController {
   private pointTexture: THREE.Texture | null = null
   /** 点位纹理的加载 Promise（防止重复加载） */
   private pointTexturePromise: Promise<THREE.Texture> | null = null
+  /** 相机飞行动画状态：从当前位置平滑过渡到目标点位 */
+  private readonly flyAnimation = {
+    active: false,
+    startTime: 0,
+    duration: 0,
+    fromPosition: new THREE.Vector3(),
+    toPosition: new THREE.Vector3(),
+    fromTarget: new THREE.Vector3(),
+    toTarget: new THREE.Vector3(),
+  }
 
   // ========== 构造函数 ==========
 
@@ -241,10 +250,10 @@ export class TilesViewerController {
     })
 
     // ---- 渲染器质量设置 ----
-    this.renderer.setPixelRatio(Math.max(window.devicePixelRatio, 2))
+    this.renderer.setPixelRatio(this.getPreferredPixelRatio())
     this.renderer.outputColorSpace = THREE.SRGBColorSpace            // sRGB 色彩空间，保证颜色一致
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping           // ACES 电影级色调映射
-    this.renderer.toneMappingExposure = 1.15                          // 色调映射曝光度，略微提亮
+    this.renderer.toneMapping = THREE.NoToneMapping                   // 更接近 Cesium 的直接色彩输出
+    this.renderer.toneMappingExposure = 1
   }
 
   // ========== 公共方法 ==========
@@ -352,15 +361,15 @@ export class TilesViewerController {
    *
    * 1. 将 (lon, lat, height) 转换为 ECEF，再通过地形 group 的 worldMatrix 映射到场景世界坐标
    * 2. 计算标记图标的缩放比例（像素 → 世界单位）
-   * 3. 用射线检测将近似位置修正到地形表面（精确贴合）
+   * 3. 若未提供高程，用射线检测将位置贴合到 3DTiles 模型/地形表面（自动贴地）
    * 4. 创建 Sprite 精灵并添加到 markerRoot 中
    *
    * @param longitude - 经度（-180 ~ 180）
    * @param latitude - 纬度（-90 ~ 90）
-   * @param height - 椭球体高度（米），默认为 0（贴地表面）
+   * @param height - 椭球体高度（米）。省略（undefined）时自动贴合模型表面
    * @throws 如果地形数据尚未加载
    */
-  async renderLonLatPoint(longitude: number, latitude: number, height = 0): Promise<void> {
+  async renderLonLatPoint(longitude: number, latitude: number, height?: number): Promise<void> {
     // 查找地形 tileset 的 group，用于 ECEF → 世界空间坐标变换
     const terrainEntry = [...this.tilesetEntries.values()].find((e) => e.config.kind === 'terrain')
     if (!terrainEntry) {
@@ -369,20 +378,29 @@ export class TilesViewerController {
 
     const terrainGroup = terrainEntry.renderer.group
 
-    // 步骤 1: WGS84 → ECEF → 世界坐标（通过 terrain group 的实际 worldMatrix）
-    const ecef = lonLatHeightToEcef(longitude, latitude, height)
+    // 步骤 1: WGS84 → ECEF → 世界坐标（通过 terrain group 的实际 worldMatrix）。
+    // 未提供高程时先按椭球面（height=0）计算近似位置，后续再通过射线检测贴到模型表面。
+    const ecef = lonLatHeightToEcef(longitude, latitude, height ?? 0)
     const approximatePosition = ecef.clone().applyMatrix4(terrainGroup.matrixWorld)
 
     const markerScale = this.getMarkerScale()
-    // 步骤 2+3: 射线检测修正 → 精确贴合到地形或模型表面
-    const groundedPosition = this.resolveGroundedPosition(approximatePosition, markerScale, terrainGroup)
+
+    // 步骤 2: 确定最终点位坐标
+    // - 未提供高程：从高空向下射线检测，贴合到 3DTiles 模型/地形表面
+    // - 提供了高程：直接使用该高程对应的位置
+    const pointPosition =
+      height === undefined
+        ? this.resolveGroundedPosition(approximatePosition, markerScale, terrainGroup)
+        : approximatePosition.clone()
+
     const pointTexture = await this.ensurePointTexture()
 
-    // 步骤 4: 创建标记精灵
+    // 步骤 3: 创建标记精灵
     const pointMaterial = new THREE.SpriteMaterial({
       map: pointTexture,
       transparent: true,
-      depthWrite: false, // 不写入深度缓冲，避免遮挡远距离内容
+      depthWrite: false, // 不写入深度缓冲，避免透明矩形遮挡后方内容
+      depthTest: false,  // 始终显示在模型之上，保证定位点清晰可见
     })
 
     // 先清除上一个点位，保持同一时间只显示一个标记
@@ -393,11 +411,14 @@ export class TilesViewerController {
     // center.set(0.5, 0.08)：x 水平居中，y 将图标尖端对齐到精灵底部附近
     pointSprite.center.set(0.5, 0.08)
     pointSprite.scale.set(markerScale, markerScale, 1)
-    pointSprite.position.copy(groundedPosition)
+    pointSprite.position.copy(pointPosition)
     pointSprite.renderOrder = 8 // 较高的渲染顺序，确保在其他内容之上显示
 
     this.markerRoot.add(pointSprite)
     this.pointSprite = pointSprite
+
+    // 渲染完成后自动飞行到定位点，方便用户直观查看
+    this.flyTo(pointPosition)
   }
 
   /**
@@ -412,6 +433,65 @@ export class TilesViewerController {
     this.markerRoot.remove(this.pointSprite)
     this.pointSprite.material.dispose()
     this.pointSprite = null
+  }
+
+  // ========== 相机飞行 ==========
+
+  /**
+   * 平滑飞行到指定世界坐标，让相机对准该点
+   *
+   * 沿当前相机视线方向反向推出相机落点（保持观察角度不变），
+   * 观察距离取标记精灵尺寸的 12 倍，使定位点清晰可见。
+   *
+   * @param target - 目标点世界坐标（通常是渲染出的定位点）
+   * @param duration - 飞行时长（毫秒）
+   */
+  flyTo(target: THREE.Vector3, duration = 900): void {
+    // 用户主动飞行后，禁止后续自动聚焦覆盖当前视角
+    this.hasSettledView = true
+
+    // 观察距离：精灵尺寸的 12 倍，让定位点约占屏幕 1/10 高度
+    const distance = Math.max(this.getMarkerScale() * 12, 120)
+
+    // 沿当前相机视线方向反向推出相机落点
+    const direction = new THREE.Vector3()
+    this.camera.getWorldDirection(direction)
+
+    const anim = this.flyAnimation
+    anim.active = true
+    anim.startTime = performance.now()
+    anim.duration = duration
+    anim.fromPosition.copy(this.camera.position)
+    anim.toPosition.copy(target).addScaledVector(direction, -distance)
+    anim.fromTarget.copy(this.controls.target)
+    anim.toTarget.copy(target)
+  }
+
+  /**
+   * 每帧推进飞行动画
+   *
+   * 使用 easeInOutCubic 缓动（两端慢、中间快）插值相机位置与轨道控制器目标点，
+   * 完成后同步 OrbitControls 内部球面状态，避免飞行结束后视角跳动。
+   */
+  private updateFlyAnimation(): void {
+    const anim = this.flyAnimation
+    const elapsed = performance.now() - anim.startTime
+    const t = Math.min(elapsed / anim.duration, 1)
+
+    // easeInOutCubic：观感更顺滑
+    const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+
+    this.camera.position.lerpVectors(anim.fromPosition, anim.toPosition, eased)
+    this.controls.target.lerpVectors(anim.fromTarget, anim.toTarget, eased)
+    this.camera.lookAt(this.controls.target)
+
+    if (t >= 1) {
+      anim.active = false
+      // 精确落位并同步 OrbitControls，防止飞行结束瞬间视角跳动
+      this.camera.position.copy(anim.toPosition)
+      this.controls.target.copy(anim.toTarget)
+      this.controls.update()
+    }
   }
 
   /**
@@ -465,7 +545,13 @@ export class TilesViewerController {
     const renderFrame = () => {
       this.animationFrameId = window.requestAnimationFrame(renderFrame)
       this.timer.update()
-      this.controls.update()
+
+      // 飞行动画期间接管相机与目标点，结束后恢复 OrbitControls 控制
+      if (this.flyAnimation.active) {
+        this.updateFlyAnimation()
+      } else {
+        this.controls.update()
+      }
 
       // 更新所有瓦片渲染器，驱动 LOD 切换和瓦片按需加载
       for (const entry of this.tilesetEntries.values()) {
@@ -585,11 +671,10 @@ export class TilesViewerController {
   /**
    * 为单个数据源创建并配置 TilesRenderer 实例
    *
-   * 清晰度策略（对标 Cesium maximumScreenSpaceError=0）：
-   * - errorTarget=0: 屏幕空间误差 0px，强制遍历到最深可用 LOD 层级
-   * - pixelRatio≥2x: 大幅超采样，增大 SSE 分辨率分母推动更激进细化
-   * - 禁用 mipmap: 纹理始终全分辨率采样，无 mip 链降级模糊
-   * - 超大 LRU: 消除缓存满导致的精细瓦片拒绝加载
+   * 清晰度策略（尽量贴近 Cesium 的稳定观感）：
+   * - errorTarget=4: 比默认 16 更积极地细化几何，但不走到 0 那么极端
+   * - 保留 mipmap + 开启各向异性: 斜视角纹理更稳、更清楚
+   * - 适度提高 LRU 和处理预算: 减少高精细瓦片的加载迟滞
    *
    * @param source - 数据源配置
    * @returns 配置完成的 TilesRenderer 实例
@@ -601,19 +686,17 @@ export class TilesViewerController {
 
     // ---- 清晰度核心：对标 Cesium ----
 
-    // 屏幕空间误差 → 0 像素。当 error ≤ 0 时停止细化。
-    // 因为 error = geometricError / (distance * sseDenominator) 且 geometricError ≥ 0，
-    // 只有 geometricError=0（叶子节点）时才满足条件。效果：始终加载最深可用瓦片。
-    tilesRenderer.errorTarget = 0
+    // 目标观感接近 Cesium：比默认更愿意细化，但保留稳定的 LOD 过渡。
+    tilesRenderer.errorTarget = 4
 
-    // 超大 LRU 缓存：errorTarget=0 会加载巨量精细瓦片，必须扩大缓存避免"卡脖"
-    tilesRenderer.lruCache.minSize = 40000
-    tilesRenderer.lruCache.maxSize = 60000
-    tilesRenderer.lruCache.minBytesSize = 3 * 1024 * 1024 * 1024 // 3 GB
-    tilesRenderer.lruCache.maxBytesSize = 4 * 1024 * 1024 * 1024 // 4 GB
+    // 适度提高缓存，避免细节瓦片刚加载完又被挤出缓存。
+    tilesRenderer.lruCache.minSize = 12000
+    tilesRenderer.lruCache.maxSize = 20000
+    tilesRenderer.lruCache.minBytesSize = 1024 * 1024 * 1024 // 1 GB
+    tilesRenderer.lruCache.maxBytesSize = 2 * 1024 * 1024 * 1024 // 2 GB
 
-    // 每帧处理大量瓦片，确保所有子节点立即预处理，不因帧预算限制而延迟
-    tilesRenderer.maxTilesProcessed = 5000
+    // 允许更积极地预处理子瓦片，但避免把主线程压得过重。
+    tilesRenderer.maxTilesProcessed = 1000
 
     // 同级瓦片并行加载 + 精细加载期间显示粗粒度祖先，避免空洞与闪烁
     tilesRenderer.loadSiblings = true
@@ -624,12 +707,12 @@ export class TilesViewerController {
 
     tilesRenderer.displayActiveTiles = false
 
-    // 注册 GLTF 扩展插件：DRACO 解压 + KTX2 GPU 纹理 + 禁用 mipmap + 自定义 MIME 类型
+    // 注册 GLTF 扩展插件：DRACO 解压 + KTX2 GPU 纹理 + 自定义 MIME 类型
     tilesRenderer.registerPlugin(
       new GLTFExtensionsPlugin({
         dracoLoader: this.dracoLoader,
         ktxLoader: this.ktx2Loader,
-        plugins: [createKtx2MimeTypePlugin(this.ktx2Loader), createNoMipmapPlugin()],
+        plugins: [createKtx2MimeTypePlugin(this.ktx2Loader)],
         autoDispose: false, // 手动管理释放，避免过早销毁共享纹理
       }),
     )
@@ -681,7 +764,7 @@ export class TilesViewerController {
     this.camera.aspect = width / height
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(width, height, false)
-    this.renderer.setPixelRatio(Math.max(window.devicePixelRatio, 2))
+    this.renderer.setPixelRatio(this.getPreferredPixelRatio())
 
     // 同步更新所有瓦片渲染器的分辨率感知 —— 必须使用 drawing buffer（物理像素）尺寸！
     // 3d-tiles-renderer 的 SSE 公式 error = geometricError / (distance * sseDenominator)，
@@ -1016,19 +1099,31 @@ export class TilesViewerController {
     }
   }
 
+  /**
+   * 返回用于渲染的目标像素比
+   *
+   * 不强制所有设备至少 2x，而是按真实设备像素比渲染，并在高分屏上做上限保护，
+   * 这样既能保持清晰，也不会因为离屏缓冲过大拖慢高精细瓦片的收敛速度。
+   */
+  private getPreferredPixelRatio(): number {
+    return THREE.MathUtils.clamp(window.devicePixelRatio || 1, 1, 2)
+  }
+
   // ========== 射线检测（点位贴合） ==========
 
   /**
-   * 通过射线检测将近似位置修正到地形或模型表面
+   * 通过射线检测将近似位置修正到 3DTiles 模型/地形表面（自动贴地）
    *
-   * 从目标点上方（沿地形 group 的局部 up 轴方向）向下发射射线，
-   * 与 tilesetRoot 中所有子物体求交，取第一个有效交点后向上偏移一小段距离
-   * （避免和表面发生 z-fighting）。
+   * 从目标点正上方沿 up 轴向下发射射线，与 tilesetRoot 中所有子物体求交，
+   * 取第一个有效交点后向上偏移一小段距离（避免和表面发生 z-fighting）。
    *
-   * @param approximatePosition - 经纬度转换后的近似世界坐标
+   * 射线起点会抬到足够高的位置，确保始终高于任何地形/模型，避免因起点
+   * 埋在地下（椭球面高程低于实际地表）而导致射线向下穿透、无法命中表面。
+   *
+   * @param approximatePosition - 经纬度转换后的近似世界坐标（椭球面附近）
    * @param markerScale - 标记精灵的世界单位尺寸
    * @param terrainGroup - 地形 tileset 的 group，用于推算 up 方向
-   * @returns 修正后的精确贴合坐标
+   * @returns 修正后的精确贴合坐标；未命中时回退到近似位置
    */
   private resolveGroundedPosition(
     approximatePosition: THREE.Vector3,
@@ -1041,8 +1136,11 @@ export class TilesViewerController {
     // ReorientationPlugin(+z, OBJECT_FRAME) 会将 +Z 旋转为 +Y（Three.js 标准 up 轴）。
     // 地形 group 的局部 up 轴在 worldSpace 中对应其 local +Y 方向。
     const worldUp = new THREE.Vector3(0, 1, 0).applyQuaternion(terrainGroup.quaternion)
-    // 射线起点：目标点上方 rayHeight 处（沿 up 方向移动）
-    const rayHeight = Math.max(this.getSceneScaleHint() * 0.6, markerScale * 6, 200)
+
+    // 射线起点：目标点上方 rayHeight 处（沿 up 方向移动）。
+    // 高度取「场景尺度的 1.5 倍 / 精灵尺寸的 20 倍 / 5km」三者最大，
+    // 保证起点高于任何地表，射线能自上而下稳定命中模型表面。
+    const rayHeight = Math.max(this.getSceneScaleHint() * 1.5, markerScale * 20, 5000)
     const rayOrigin = approximatePosition.clone().addScaledVector(worldUp, rayHeight)
     // 射线方向：沿 up 的反方向向下
     const rayDirection = worldUp.clone().negate()
@@ -1055,7 +1153,7 @@ export class TilesViewerController {
     const hit = intersections.find((intersection) => intersection.distance >= 0)
 
     if (!hit) {
-      // 没有命中任何表面，使用近似位置作为回退
+      // 没有命中任何表面（例如该经纬度处的瓦片尚未加载），使用近似位置作为回退
       return approximatePosition
     }
 
@@ -1127,10 +1225,8 @@ export class TilesViewerController {
   /**
    * 对刚加载的模型递归遍历，提升所有材质纹理的采样质量
    *
-   * - anisotropy → GPU 最大，消除斜角观察时的纹理模糊
-   * - magFilter → LinearFilter，纹理放大时线性插值
-   * - minFilter → LinearFilter（无 mipmap），由 noMipmapPlugin 保证不生成 mipmap，
-   *   始终在全分辨率纹理上采样，最清晰
+   * - anisotropy → GPU 最大，改善斜角观察时的纹理清晰度
+   * - 保留原始 mipmap / filter 策略，避免把带 mip 的纹理强行改成单层采样后发花
    *
    * @param scene - 已加载的模型根节点
    */
@@ -1154,8 +1250,6 @@ export class TilesViewerController {
           if (value && (value as THREE.Texture).isTexture) {
             const texture = value as THREE.Texture
             texture.anisotropy = maxAnisotropy
-            texture.magFilter = THREE.LinearFilter
-            texture.minFilter = THREE.LinearFilter
             texture.needsUpdate = true
           }
         }
