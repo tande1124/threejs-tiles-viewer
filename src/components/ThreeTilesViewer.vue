@@ -4,56 +4,12 @@
       <div ref="viewerRoot" class="viewer-canvas"></div>
     </div>
 
-    <el-card class="tool-dialog" shadow="always">
-      <el-form
-        class="tool-form"
-        label-position="top"
-        @submit.prevent="submitPoint"
-      >
-        <el-form-item label="经度（Longitude）">
-          <el-input
-            v-model="longitudeInput"
-            size="large"
-          />
-        </el-form-item>
-
-        <el-form-item label="纬度（Latitude）">
-          <el-input
-            v-model="latitudeInput"
-            size="large"
-          />
-        </el-form-item>
-
-        <el-form-item label="高程（Height / 米，可选）">
-          <el-input
-            v-model="heightInput"
-            size="large"
-          />
-        </el-form-item>
-
-        <el-alert
-          v-if="formError"
-          :title="formError"
-          type="error"
-          show-icon
-          :closable="false"
-        />
-
-        <div class="tool-actions">
-          <el-button
-            type="primary"
-            size="large"
-            :loading="isSubmittingPoint"
-            @click="submitPoint"
-          >
-            {{ isSubmittingPoint ? '渲染中...' : '渲染点位' }}
-          </el-button>
-          <el-button size="large" @click="clearPoint">
-            清除点位
-          </el-button>
-        </div>
-      </el-form>
-    </el-card>
+    <PointLocatorForm
+      :submitting="isSubmittingPoint"
+      :error="pointError"
+      @submit="handlePointSubmit"
+      @clear="clearPoint"
+    />
   </div>
 </template>
 
@@ -64,17 +20,20 @@ import {
   type ViewerStatus,
 } from '@/utils/TilesViewerController'
 import { getDefaultSceneConfig } from '@/utils/tileset'
+import PointLocatorForm, {
+  type PointSubmitPayload,
+} from '@/components/PointLocatorForm.vue'
 
 export default defineComponent({
   name: 'ThreeTilesViewer',
+  components: {
+    PointLocatorForm,
+  },
   data() {
     return {
       controller: null as TilesViewerController | null,
       defaultSceneConfig: getDefaultSceneConfig(),
-      longitudeInput: '98.348344',
-      latitudeInput: '29.65326',
-      heightInput: '2740',
-      formError: '',
+      pointError: '',
       isSubmittingPoint: false,
     }
   },
@@ -120,51 +79,32 @@ export default defineComponent({
       await this.controller.loadScene(this.defaultSceneConfig.sources)
     },
 
-    /** 提交经纬度，转换为场景坐标并渲染点位精灵 */
-    async submitPoint() {
+    /** 处理表单提交的经纬度，渲染点位并自动飞行定位 */
+    async handlePointSubmit(payload: PointSubmitPayload) {
       if (!this.controller) {
-        this.formError = '场景控制器尚未初始化。'
+        this.pointError = '场景控制器尚未初始化。'
         return
       }
 
-      const longitude = Number(this.longitudeInput)
-      const latitude = Number(this.latitudeInput)
-      // 高程留空时传 undefined，由控制器自动贴合到模型表面
-      const heightRaw = this.heightInput.trim()
-      const hasHeight = heightRaw !== ''
-      const height = hasHeight ? Number(heightRaw) : undefined
-
-      if (!this.longitudeInput || !this.latitudeInput) {
-        this.formError = '请先输入经度和纬度。'
-        return
-      }
-      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
-        this.formError = '经度必须是 -180 到 180 之间的有效数值。'
-        return
-      }
-      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
-        this.formError = '纬度必须是 -90 到 90 之间的有效数值。'
-        return
-      }
-      if (hasHeight && !Number.isFinite(height)) {
-        this.formError = '高程必须是有效数值，也可以留空自动贴合模型表面。'
-        return
-      }
-
-      this.formError = ''
+      this.pointError = ''
       this.isSubmittingPoint = true
 
       try {
-        await this.controller.renderLonLatPoint(longitude, latitude, height)
+        await this.controller.renderLonLatPoint(
+          payload.longitude,
+          payload.latitude,
+          payload.height,
+        )
       } catch (error) {
-        this.formError = error instanceof Error ? error.message : '点位渲染失败，请稍后重试。'
+        this.pointError =
+          error instanceof Error ? error.message : '点位渲染失败，请稍后重试。'
       } finally {
         this.isSubmittingPoint = false
       }
     },
 
     clearPoint() {
-      this.formError = ''
+      this.pointError = ''
       this.controller?.clearLonLatPoint()
     },
   },
