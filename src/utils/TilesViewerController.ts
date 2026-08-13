@@ -17,6 +17,31 @@ import type { TilesetSourceConfig } from '@/utils/tileset'
 /** 复用的空包围盒，避免反复创建 */
 const EMPTY_BOX = new THREE.Box3()
 
+/**
+ * 3D Tiles 高清调度参数。
+ *
+ * 说明：
+ * - errorTarget 越小，LOD 越积极，画面越清晰，但请求/解析/GPU 开销越高。
+ * - maxTilesProcessed 越大，单帧允许处理的瓦片越多，高清 LOD 收敛越快，但主线程压力越大。
+ * - 这些参数是针对“优先清晰度”的配置，不是绝对等同于 Cesium 的 maximumScreenSpaceError。
+ */
+const TILE_QUALITY = {
+  /** 高清模式：优先让近距离区域继续细分 */
+  errorTarget: 1.0,
+  /** 防止遍历预算过小导致高清瓦片迟迟不能进入场景 */
+  maxTilesProcessed: 4000,
+  /** 允许祖先/同级瓦片预加载，减少高清瓦片到来前的空洞 */
+  loadSiblings: true,
+  loadAncestors: true,
+  /** 极深的瓦片树也允许继续遍历 */
+  maxDepth: 64,
+  /** LRU 缓存：共享给多个 TilesRenderer */
+  cacheMinSize: 12000,
+  cacheMaxSize: 20000,
+  cacheMinBytes: 1024 * 1024 * 1024,
+  cacheMaxBytes: 2 * 1024 * 1024 * 1024,
+} as const
+
 // ========== 公开接口 ==========
 
 /**
@@ -148,6 +173,8 @@ export class TilesViewerController {
    * 自动更新相机宽高比和渲染器分辨率
    */
   private readonly resizeObserver = new ResizeObserver(() => this.handleResize())
+  /** 复用的绘制缓冲区尺寸向量，避免每帧分配 */
+  private readonly resolutionSize = new THREE.Vector2()
 
   // ========== 内部状态 ==========
 
@@ -275,6 +302,10 @@ export class TilesViewerController {
     this.resizeObserver.observe(container)
     this.handleResize()
     this.startLoop()
+
+    // 暴露到 window，便于在控制台执行 __tilesViewer.debugTilesQuality() 诊断 LOD 调度深度
+    ;(window as unknown as { __tilesViewer?: TilesViewerController }).__tilesViewer = this
+
     this.emitStatus({
       state: 'idle',
       progress: 0,
@@ -446,6 +477,92 @@ export class TilesViewerController {
   }
 
   /**
+   * 打印当前 3D Tiles 高清调度参数。
+   *
+   * 用于排查“Three.js 比 Cesium 模糊”问题。
+   * 如果降低 errorTarget 后明显变清楚，基本可以确认是 LOD 收敛问题。
+   */
+  debugTilesQuality(): void {
+    console.table({
+      errorTarget: TILE_QUALITY.errorTarget,
+      maxTilesProcessed: TILE_QUALITY.maxTilesProcessed,
+      loadSiblings: TILE_QUALITY.loadSiblings,
+      loadAncestors: TILE_QUALITY.loadAncestors,
+      maxDepth: TILE_QUALITY.maxDepth,
+      pixelRatio: this.renderer.getPixelRatio(),
+      drawingBuffer: `${this.renderer.domElement.width} x ${this.renderer.domElement.height}`,
+      cameraFov: this.camera.fov,
+      cameraNear: this.camera.near,
+      cameraFar: this.camera.far,
+      tilesetCount: this.tilesetEntries.size,
+    })
+
+    // 确保世界矩阵最新，以便计算可见瓦片的真实世界位置（判断是否存在“被平移出场景”的瓦片）
+    this.tilesetRoot.updateMatrixWorld(true)
+    const worldPosition = new THREE.Vector3()
+
+    // 每个数据源的实时瓦片统计，用于确认深层 LOD 是否真正进入场景。
+    // 修复后缩放靠近地形时，visible/active 数量与 maxVisibleDepth 应显著上升；
+    // farTiles 应保持为 0（非 0 说明仍有瓦片被 ECEF 重复变换平移到数公里外）。
+    const entries = Array.from(this.tilesetEntries.values()).map((entry) => {
+      const stats = (entry.renderer as unknown as { stats: Record<string, number> }).stats
+
+      // 计算可见瓦片的深度分布，以及是否存在“远离场景原点”的错位瓦片
+      let maxVisibleDepth = 0
+      let farTiles = 0
+      const depthHistogram: Record<number, number> = {}
+      const traverse = entry.renderer.traverse.bind(entry.renderer) as unknown as (
+        before: (tile: {
+          internal: { depth: number }
+          traversal?: { visible?: boolean }
+          engineData?: { scene?: THREE.Object3D | null }
+        }) => boolean,
+        after: null,
+        ensureFullyProcessed?: boolean,
+      ) => void
+      traverse(
+        (tile) => {
+          if (!tile.traversal?.visible) {
+            return false
+          }
+          const depth = tile.internal.depth
+          maxVisibleDepth = Math.max(maxVisibleDepth, depth)
+          depthHistogram[depth] = (depthHistogram[depth] || 0) + 1
+
+          const scene = tile.engineData?.scene
+          if (scene) {
+            scene.getWorldPosition(worldPosition)
+            // 场景 recenter 后正常瓦片应落在原点附近（本场景约几公里）。
+            // 若世界坐标超过 100km，说明该瓦片仍被重复 ECEF 变换平移到远处。
+            if (worldPosition.length() > 100_000) {
+              farTiles++
+            }
+          }
+          return false
+        },
+        null,
+        false,
+      )
+
+      return {
+        id: entry.config.id,
+        state: entry.state,
+        loaded: stats.loaded,
+        visible: stats.visible,
+        active: stats.active,
+        inFrustum: stats.inFrustum,
+        inCache: stats.inCache,
+        tilesProcessed: stats.tilesProcessed,
+        maxVisibleDepth,
+        farTiles,
+        depthHistogram,
+      }
+    })
+
+    console.table(entries)
+  }
+
+  /**
    * 销毁控制器，释放所有 GPU 资源和 DOM 监听
    *
    * 释放顺序：
@@ -456,6 +573,11 @@ export class TilesViewerController {
    * 应在组件 beforeUnmount 或页面离开时调用
    */
   destroy(): void {
+    const debugWindow = window as unknown as { __tilesViewer?: TilesViewerController | null }
+    if (debugWindow.__tilesViewer === this) {
+      debugWindow.__tilesViewer = null
+    }
+
     window.clearTimeout(this.fitTimerId)
     cancelAnimationFrame(this.animationFrameId)
     this.resizeObserver.disconnect()
@@ -498,8 +620,17 @@ export class TilesViewerController {
         this.controls.update()
       }
 
-      // 更新所有瓦片渲染器，驱动 LOD 切换和瓦片按需加载
+      // 非常重要：
+      // TilesRenderer.update() 必须使用“本帧最新”的相机矩阵。
+      // renderer.render() 会在真正绘制时更新 matrixWorld，但此时已经太晚了，
+      // 因为 Tile LOD / frustum culling 已经在 update() 中完成。
+      this.camera.updateMatrixWorld()
+
+      // 更新所有瓦片渲染器，驱动 LOD 切换和按需加载。
+      // syncTileResolution() 也在这里同步，确保窗口/DPR变化后 SSE
+      // 始终使用当前真实绘制分辨率（含 pixelRatio）。
       for (const entry of this.tilesetEntries.values()) {
+        this.syncTileResolution(entry)
         entry.renderer.update()
       }
 
@@ -617,7 +748,7 @@ export class TilesViewerController {
    * 为单个数据源创建并配置 TilesRenderer 实例
    *
    * 清晰度策略（尽量贴近 Cesium 的稳定观感）：
-   * - errorTarget=4: 比默认 16 更积极地细化几何，但不走到 0 那么极端
+   * - errorTarget=1.0: 比默认 16 更积极地细化几何，接近 Cesium maximumScreenSpaceError=1 的观感
    * - 保留 mipmap + 开启各向异性: 斜视角纹理更稳、更清楚
    * - 适度提高 LRU 和处理预算: 减少高精细瓦片的加载迟滞
    *
@@ -629,48 +760,75 @@ export class TilesViewerController {
 
     tilesRenderer.group.name = source.id
 
-    // ---- 清晰度核心：对标 Cesium ----
+    // ============================================================
+    // 1. 高清 LOD 核心参数
+    // ============================================================
 
-    // 目标观感接近 Cesium：比默认更愿意细化，但保留稳定的 LOD 过渡。
-    tilesRenderer.errorTarget = 4
+    // 比默认值更积极地追踪高精度 Tile。
+    // 这不是 Cesium maximumScreenSpaceError 的一一对应值，
+    // 但对于“近距离高清”场景，1px 是一个比较激进的测试/生产起点。
+    tilesRenderer.errorTarget = TILE_QUALITY.errorTarget
 
-    // 适度提高缓存，避免细节瓦片刚加载完又被挤出缓存。
-    tilesRenderer.lruCache.minSize = 12000
-    tilesRenderer.lruCache.maxSize = 20000
-    tilesRenderer.lruCache.minBytesSize = 1024 * 1024 * 1024 // 1 GB
-    tilesRenderer.lruCache.maxBytesSize = 2 * 1024 * 1024 * 1024 // 2 GB
+    // 增大单帧 Tile traversal 预算，避免高清子瓦片已经被发现，
+    // 但因为每帧处理预算太小而迟迟不能进入场景。
+    tilesRenderer.maxTilesProcessed = TILE_QUALITY.maxTilesProcessed
 
-    // 允许更积极地预处理子瓦片，但避免把主线程压得过重。
-    tilesRenderer.maxTilesProcessed = 1000
+    // 允许祖先和同级 Tile 提前加载：
+    // - ancestors：高清子瓦片到来前仍有上一层画面
+    // - siblings：相机移动时附近区域更容易提前准备
+    tilesRenderer.loadAncestors = TILE_QUALITY.loadAncestors
+    tilesRenderer.loadSiblings = TILE_QUALITY.loadSiblings
 
-    // 同级瓦片并行加载 + 精细加载期间显示粗粒度祖先，避免空洞与闪烁
-    tilesRenderer.loadSiblings = true
-    tilesRenderer.loadAncestors = true
+    // 防止 Tile 树深度限制导致深层 LOD 永远无法到达。
+    tilesRenderer.maxDepth = TILE_QUALITY.maxDepth
 
-    // 最大深度：覆盖一切可能的瓦片树深度（Cesium 无此限制）
-    tilesRenderer.maxDepth = 64
-
+    // 不强制显示所有 active tiles，避免过多中间层级同时叠加。
     tilesRenderer.displayActiveTiles = false
 
-    // 注册 GLTF 扩展插件：DRACO 解压 + KTX2 GPU 纹理 + 自定义 MIME 类型
+    // ============================================================
+    // 2. LRU 缓存
+    // ============================================================
+
+    // 每个 TilesRenderer 独立维护缓存，避免在单个 tileset 被 dispose 时
+    // 误伤其它仍在使用的 tileset。
+    tilesRenderer.lruCache.minSize = TILE_QUALITY.cacheMinSize
+    tilesRenderer.lruCache.maxSize = TILE_QUALITY.cacheMaxSize
+    tilesRenderer.lruCache.minBytesSize = TILE_QUALITY.cacheMinBytes
+    tilesRenderer.lruCache.maxBytesSize = TILE_QUALITY.cacheMaxBytes
+
+    // ============================================================
+    // 3. GLTF / DRACO / KTX2
+    // ============================================================
+
     tilesRenderer.registerPlugin(
       new GLTFExtensionsPlugin({
         dracoLoader: this.dracoLoader,
         ktxLoader: this.ktx2Loader,
         plugins: [createKtx2MimeTypePlugin(this.ktx2Loader)],
-        autoDispose: false, // 手动管理释放，避免过早销毁共享纹理
+        autoDispose: false,
       }),
     )
-    // 注册坐标重定向插件：确保 Z 轴朝上，并将内容居中到原点附近。
-    // recenter 对 GPU 精度至关重要 — ECEF 坐标在 ~6.4M 单位处仅 ~0.5m float 精度，
-    // 导致顶点抖动/深度冲突/模糊。居中到原点后精度恢复为亚毫米级。
-    tilesRenderer.registerPlugin(new ReorientationPlugin({ up: '+z', recenter: true }))
+
+    // ECEF 大坐标场景建议 recenter，避免 Three.js float 精度问题。
+    // 如果你的 terrain 和模型必须保持严格的全球 ECEF 相对位置，
+    // 请确认所有 tileset 的坐标重定向策略一致。
+    tilesRenderer.registerPlugin(
+      new ReorientationPlugin({
+        up: '+z',
+        recenter: true,
+      }),
+    )
+
+    // ============================================================
+    // 4. 注册相机
+    // ============================================================
 
     tilesRenderer.setCamera(this.camera)
-    // 使用物理像素尺寸而非 CSS 像素，确保 SSE 计算的分辨率正确
-    const tBufferSize = new THREE.Vector2()
-    this.renderer.getDrawingBufferSize(tBufferSize)
-    tilesRenderer.setResolution(this.camera, tBufferSize.x, tBufferSize.y)
+
+    // 直接使用 renderer 的实际绘制缓冲区尺寸（含 pixelRatio）设置 SSE 分辨率，
+    // 避免高 DPR 屏上 LOD 收敛比 Cesium 慢、画面偏糊。
+    this.renderer.getDrawingBufferSize(this.resolutionSize)
+    tilesRenderer.setResolution(this.camera, this.resolutionSize.x, this.resolutionSize.y)
 
     return tilesRenderer
   }
@@ -692,6 +850,22 @@ export class TilesViewerController {
     entry.renderer.dispose()
   }
 
+  /**
+   * 将瓦片渲染器的 SSE 分辨率同步为渲染缓冲区的实际像素尺寸
+   *
+   * 官方 setResolutionFromRenderer 内部使用 renderer.getSize()（CSS 逻辑尺寸），
+   * 未包含 pixelRatio。而 SSE 的目标是「屏幕像素误差」，Cesium 使用的是
+   * canvas 实际绘制缓冲（逻辑尺寸 × DPR）。高 DPR 屏上两者相差 DPR 倍，
+   * 会导致 Three.js 的 LOD 收敛比 Cesium 慢 DPR 倍、画面偏糊。
+   * 这里改用 getDrawingBufferSize() 与 Cesium 对齐。
+   *
+   * @param entry - 待同步分辨率的瓦片集条目
+   */
+  private syncTileResolution(entry: ManagedTilesetEntry): void {
+    this.renderer.getDrawingBufferSize(this.resolutionSize)
+    entry.renderer.setResolution(this.camera, this.resolutionSize.x, this.resolutionSize.y)
+  }
+
   // ========== 视口自适应 ==========
 
   /**
@@ -711,14 +885,9 @@ export class TilesViewerController {
     this.renderer.setSize(width, height, false)
     this.renderer.setPixelRatio(this.getPreferredPixelRatio())
 
-    // 同步更新所有瓦片渲染器的分辨率感知 —— 必须使用 drawing buffer（物理像素）尺寸！
-    // 3d-tiles-renderer 的 SSE 公式 error = geometricError / (distance * sseDenominator)，
-    // sseDenominator 正比于 1/resolution.height。如果传入 CSS 像素而非物理像素，
-    // sseDenominator 会偏大，error 会被严重缩小，导致系统误判瓦片"已经足够精细"而停止细化。
-    const bufferSize = new THREE.Vector2()
-    this.renderer.getDrawingBufferSize(bufferSize)
+    // 同步 SSE 分辨率为当前 canvas 绘制缓冲区尺寸（含 DPR）。
     for (const entry of this.tilesetEntries.values()) {
-      entry.renderer.setResolution(this.camera, bufferSize.x, bufferSize.y)
+      this.syncTileResolution(entry)
     }
   }
 
@@ -1036,10 +1205,11 @@ export class TilesViewerController {
    * 用于在场景切换或初始聚焦后立即刷新显示
    */
   private forceTilesetUpdate(): void {
-    const fbSize = new THREE.Vector2()
-    this.renderer.getDrawingBufferSize(fbSize)
+    // 强制使用最新相机矩阵再做一次 Tile traversal。
+    this.camera.updateMatrixWorld()
+
     for (const entry of this.tilesetEntries.values()) {
-      entry.renderer.setResolution(this.camera, fbSize.x, fbSize.y)
+      this.syncTileResolution(entry)
       entry.renderer.update()
     }
   }
