@@ -30,9 +30,16 @@ const TILE_QUALITY = {
   errorTarget: 1.0,
   /** 防止遍历预算过小导致高清瓦片迟迟不能进入场景 */
   maxTilesProcessed: 4000,
-  /** 允许祖先/同级瓦片预加载，减少高清瓦片到来前的空洞 */
-  loadSiblings: true,
-  loadAncestors: true,
+  /**
+   * 关闭祖先/同级瓦片预加载与“占位”行为。
+   *
+   * loadAncestors 在 v0.5.1 中默认开启，且被标记为 Experimental：当某个 REPLACE 瓦片的
+   * 子级尚未全部加载完成时，会把该瓦片标记为 isLeaf 当作占位显示，从而在粗粒度层级
+   * “卡住”不再向下细分（实测只细分到 depth 2，仅 1 个瓦片可见）。关闭后遍历会直接下钻
+   * 到满足 SSE 误差的真实叶子瓦片，LOD 才能正确收敛。
+   */
+  loadSiblings: false,
+  loadAncestors: false,
   /** 极深的瓦片树也允许继续遍历 */
   maxDepth: 64,
   /** LRU 缓存：共享给多个 TilesRenderer */
@@ -191,6 +198,8 @@ export class TilesViewerController {
   private fitTimerId = 0
   /** 是否已经完成一次自动聚焦 */
   private hasSettledView = false
+  /** 是否已自动打印过一次 LOD/纹理诊断（避免重复刷屏） */
+  private hasAutoLoggedDiagnostics = false
   /** 上一次发出的状态 key（去重用） */
   private lastStatusKey = ''
   /** 从元数据中预先计算出的组合包围盒 */
@@ -482,8 +491,11 @@ export class TilesViewerController {
    * 用于排查“Three.js 比 Cesium 模糊”问题。
    * 如果降低 errorTarget 后明显变清楚，基本可以确认是 LOD 收敛问题。
    */
-  debugTilesQuality(): void {
-    console.table({
+  debugTilesQuality(): {
+    settings: Record<string, number | string | boolean>
+    entries: ReturnType<TilesViewerController['buildTileDiagnostics']>
+  } {
+    const settings: Record<string, number | string | boolean> = {
       errorTarget: TILE_QUALITY.errorTarget,
       maxTilesProcessed: TILE_QUALITY.maxTilesProcessed,
       loadSiblings: TILE_QUALITY.loadSiblings,
@@ -495,7 +507,39 @@ export class TilesViewerController {
       cameraNear: this.camera.near,
       cameraFar: this.camera.far,
       tilesetCount: this.tilesetEntries.size,
-    })
+    }
+    const entries = this.buildTileDiagnostics()
+
+    // 用 console.log（而非仅 console.table）打印，确保任何控制台环境都可见。
+    console.log('[3D Tiles 诊断] 调度设置:', settings)
+    console.log('[3D Tiles 诊断] 瓦片统计:', entries)
+    console.log('[3D Tiles 诊断] 完整 JSON:', JSON.stringify({ settings, entries }, null, 2))
+
+    return { settings, entries }
+  }
+
+  /** 汇总每个数据源的可见瓦片深度分布与纹理采样状态，供诊断与复制使用 */
+  private buildTileDiagnostics(): Array<{
+    id: string
+    state: string
+    loaded: number
+    visible: number
+    active: number
+    inFrustum: number
+    inCache: number
+    tilesProcessed: number
+    maxVisibleDepth: number
+    farTiles: number
+    depthHistogram: Record<number, number>
+    textureSummary: {
+      total: number
+      noMipmap: number
+      compressedNoMipmap: number
+      minFilters: Record<string, number>
+      colorSpaces: Record<string, number>
+      anisotropies: Record<string, number>
+    }
+  }> {
 
     // 确保世界矩阵最新，以便计算可见瓦片的真实世界位置（判断是否存在“被平移出场景”的瓦片）
     this.tilesetRoot.updateMatrixWorld(true)
@@ -511,6 +555,14 @@ export class TilesViewerController {
       let maxVisibleDepth = 0
       let farTiles = 0
       const depthHistogram: Record<number, number> = {}
+      const textureSummary = {
+        total: 0,
+        noMipmap: 0,
+        compressedNoMipmap: 0,
+        minFilters: {} as Record<string, number>,
+        colorSpaces: {} as Record<string, number>,
+        anisotropies: {} as Record<string, number>,
+      }
       const traverse = entry.renderer.traverse.bind(entry.renderer) as unknown as (
         before: (tile: {
           internal: { depth: number }
@@ -537,6 +589,36 @@ export class TilesViewerController {
             if (worldPosition.length() > 100_000) {
               farTiles++
             }
+
+            // 采样纹理状态，确认是否存在“无 mipmap 的压缩纹理”（KTX2 levelCount=1）
+            // 导致远距离/斜视角下纹理锯齿、细节丢失的问题。
+            scene.traverse((child) => {
+              const childMesh = child as THREE.Mesh
+              if (!childMesh.isMesh) return
+              const mats = Array.isArray(childMesh.material) ? childMesh.material : [childMesh.material]
+              for (const mat of mats) {
+                if (!mat) continue
+                for (const key of Object.keys(mat)) {
+                  const v = (mat as unknown as Record<string, unknown>)[key]
+                  if (!v || !(v as THREE.Texture).isTexture) continue
+                  const tex = v as THREE.Texture
+                  textureSummary.total++
+                  const mipCount = Array.isArray(tex.mipmaps) ? tex.mipmaps.length : 0
+                  if (mipCount <= 1) {
+                    textureSummary.noMipmap++
+                    if (tex instanceof THREE.CompressedTexture) {
+                      textureSummary.compressedNoMipmap++
+                    }
+                  }
+                  const minF = tex.minFilter
+                  textureSummary.minFilters[minF] = (textureSummary.minFilters[minF] || 0) + 1
+                  const cs = String(tex.colorSpace)
+                  textureSummary.colorSpaces[cs] = (textureSummary.colorSpaces[cs] || 0) + 1
+                  const aniso = String(tex.anisotropy)
+                  textureSummary.anisotropies[aniso] = (textureSummary.anisotropies[aniso] || 0) + 1
+                }
+              }
+            })
           }
           return false
         },
@@ -556,10 +638,11 @@ export class TilesViewerController {
         maxVisibleDepth,
         farTiles,
         depthHistogram,
+        textureSummary,
       }
     })
 
-    console.table(entries)
+    return entries
   }
 
   /**
@@ -718,6 +801,13 @@ export class TilesViewerController {
         entry.hasContent = entry.hasContent || entry.renderer.group.children.length > 0
         this.scheduleCameraFit()
         this.refreshStatus()
+
+        // 首次加载完成后自动打印一次诊断，方便在控制台直接看到 LOD/纹理状态，
+        // 无需手动访问 __tilesViewer 全局对象。
+        if (!this.hasAutoLoggedDiagnostics) {
+          this.hasAutoLoggedDiagnostics = true
+          window.setTimeout(() => this.debugTilesQuality(), 1200)
+        }
       },
       /** 加载过程中发生错误时触发 */
       loadError: (event) => {
@@ -773,9 +863,9 @@ export class TilesViewerController {
     // 但因为每帧处理预算太小而迟迟不能进入场景。
     tilesRenderer.maxTilesProcessed = TILE_QUALITY.maxTilesProcessed
 
-    // 允许祖先和同级 Tile 提前加载：
-    // - ancestors：高清子瓦片到来前仍有上一层画面
-    // - siblings：相机移动时附近区域更容易提前准备
+    // 关闭祖先/同级瓦片的预加载与“占位”行为（详见 TILE_QUALITY 注释）。
+    // 否则 loadAncestors 会在子瓦片未全部就绪时把父瓦片标记为叶子占位，
+    // 导致 LOD 卡在粗粒度层级无法继续下钻。
     tilesRenderer.loadAncestors = TILE_QUALITY.loadAncestors
     tilesRenderer.loadSiblings = TILE_QUALITY.loadSiblings
 
@@ -1251,11 +1341,24 @@ export class TilesViewerController {
 
         for (const key of Object.keys(mat)) {
           const value = (mat as unknown as Record<string, unknown>)[key]
-          if (value && (value as THREE.Texture).isTexture) {
-            const texture = value as THREE.Texture
-            texture.anisotropy = maxAnisotropy
-            texture.needsUpdate = true
+          if (!value || !(value as THREE.Texture).isTexture) continue
+
+          const texture = value as THREE.Texture
+          texture.anisotropy = maxAnisotropy
+
+          // 纹理自带 mipmap，或为非压缩纹理（可由 GPU 生成 mipmap）时，
+          // 统一改用三线性采样，减少远距离/斜视角下的锯齿与细节丢失。
+          // 注意：osgb2tiles5 导出的 KTX2 常为 levelCount=1（无 mipmap），
+          // 压缩纹理无法在 GPU 端 generateMipmap，这种情况保持 LinearFilter。
+          const mipCount = Array.isArray(texture.mipmaps) ? texture.mipmaps.length : 0
+          if (mipCount > 1) {
+            texture.minFilter = THREE.LinearMipmapLinearFilter
+          } else if (!(texture instanceof THREE.CompressedTexture)) {
+            texture.minFilter = THREE.LinearMipmapLinearFilter
+            texture.generateMipmaps = true
           }
+
+          texture.needsUpdate = true
         }
       }
     })
