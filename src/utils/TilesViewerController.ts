@@ -26,17 +26,26 @@ const EMPTY_BOX = new THREE.Box3()
  * - 这些参数是针对“优先清晰度”的配置，不是绝对等同于 Cesium 的 maximumScreenSpaceError。
  */
 const TILE_QUALITY = {
-  /** 高清模式：优先让近距离区域继续细分 */
-  errorTarget: 1.0,
+  /**
+   * 屏幕空间误差阈值（像素），对标 Cesium 的 maximumScreenSpaceError。
+   *
+   * 数值越小越清晰、但首屏越“碎”。4 是常见“高清”档位：
+   * - 首屏（远处）停在 L2~L3，显示整体粗网格，不碎；
+   * - 放大到 ~2km 细化到 L16、~1km 到 L18、~500m 到最细 L20，足够清晰。
+   *
+   * 1.0 会首屏就细化到 L16（太碎）；16（库/Cesium 默认）放大到 2km 仍停在 L2（偏糊）。
+   */
+  errorTarget: 4,
   /** 防止遍历预算过小导致高清瓦片迟迟不能进入场景 */
   maxTilesProcessed: 4000,
   /**
-   * 关闭祖先/同级瓦片预加载与“占位”行为。
+   * 关闭 v0.5.1 的“占位”实验特性（loadAncestors / loadSiblings）。
    *
-   * loadAncestors 在 v0.5.1 中默认开启，且被标记为 Experimental：当某个 REPLACE 瓦片的
-   * 子级尚未全部加载完成时，会把该瓦片标记为 isLeaf 当作占位显示，从而在粗粒度层级
-   * “卡住”不再向下细分（实测只细分到 depth 2，仅 1 个瓦片可见）。关闭后遍历会直接下钻
-   * 到满足 SSE 误差的真实叶子瓦片，LOD 才能正确收敛。
+   * loadAncestors 在子级瓦片尚未就绪时会把父级标记为叶子占位显示，本意是加载中不留洞，
+   * 但 v0.5.1 里它会让 LOD 永久卡在粗层级（画面糊成一片、仅 1 个瓦片可见），因此关闭。
+   *
+   * 直接依赖 errorTarget 驱动 SSE 细化：按相机距离逐步加载更深层瓦片，
+   * 首屏就会尽快请求到当前视角应有的细节层级。
    */
   loadSiblings: false,
   loadAncestors: false,
@@ -137,9 +146,9 @@ interface ManagedTilesetEntry {
  * - **经纬度点位渲染**：将 WGS84 坐标映射到场景表面并显示标记精灵
  * - **资源管理**：完整的 GPU 资源释放链，防止内存泄漏
  *
- * ## 清晰度策略（对标 Cesium maximumScreenSpaceError=0）
+ * ## 清晰度策略（对标 Cesium maximumScreenSpaceError，取 4 的高清档位）
  *
- * - 适度降低 errorTarget：比默认值更积极细化，但避免过度追深导致长期停留在过渡层级
+ * - errorTarget=4：远处显示整体粗网格，放大时按相机距离逐步细化视野内区域
  * - pixelRatio 按设备像素比渲染：保证高分屏清晰，同时控制性能开销
  * - 保留 mipmap 链并开启各向异性过滤：更接近 Cesium 的斜视纹理观感
  * - 关闭 ACES Filmic：避免影调压缩带来的“发灰发糊”观感
@@ -200,6 +209,10 @@ export class TilesViewerController {
   private hasSettledView = false
   /** 是否已自动打印过一次 LOD/纹理诊断（避免重复刷屏） */
   private hasAutoLoggedDiagnostics = false
+  /** 调试 HUD 元素：实时显示相机距离 / errorTarget / 可见瓦片数，用于排查缩放是否生效 */
+  private debugHud: HTMLElement | null = null
+  /** 调试 HUD 上一次刷新时间戳（节流用） */
+  private debugHudLastUpdate = 0
   /** 上一次发出的状态 key（去重用） */
   private lastStatusKey = ''
   /** 从元数据中预先计算出的组合包围盒 */
@@ -307,6 +320,10 @@ export class TilesViewerController {
     this.container = container
     this.container.innerHTML = ''
     this.container.appendChild(this.renderer.domElement)
+
+    // 挂载实时调试 HUD：显示相机距离 / errorTarget / 可见瓦片数，
+    // 用于快速判断鼠标缩放是否真的移动了相机、是否触发了 LOD 细化。
+    this.debugHud = this.createDebugHud(container)
 
     this.resizeObserver.observe(container)
     this.handleResize()
@@ -495,8 +512,13 @@ export class TilesViewerController {
     settings: Record<string, number | string | boolean>
     entries: ReturnType<TilesViewerController['buildTileDiagnostics']>
   } {
+    const firstRenderer = this.tilesetEntries.values().next().value as
+      | ManagedTilesetEntry
+      | undefined
     const settings: Record<string, number | string | boolean> = {
+      // 目标精度 + 当前实际生效值
       errorTarget: TILE_QUALITY.errorTarget,
+      currentErrorTarget: firstRenderer?.renderer.errorTarget ?? TILE_QUALITY.errorTarget,
       maxTilesProcessed: TILE_QUALITY.maxTilesProcessed,
       loadSiblings: TILE_QUALITY.loadSiblings,
       loadAncestors: TILE_QUALITY.loadAncestors,
@@ -506,6 +528,8 @@ export class TilesViewerController {
       cameraFov: this.camera.fov,
       cameraNear: this.camera.near,
       cameraFar: this.camera.far,
+      cameraDistance: Math.round(this.camera.position.distanceTo(this.controls.target)),
+      cameraPosition: `[${this.camera.position.x.toFixed(0)}, ${this.camera.position.y.toFixed(0)}, ${this.camera.position.z.toFixed(0)}]`,
       tilesetCount: this.tilesetEntries.size,
     }
     const entries = this.buildTileDiagnostics()
@@ -663,6 +687,8 @@ export class TilesViewerController {
 
     window.clearTimeout(this.fitTimerId)
     cancelAnimationFrame(this.animationFrameId)
+    this.debugHud?.remove()
+    this.debugHud = null
     this.resizeObserver.disconnect()
     this.clearSceneSources()
     this.pointMarkerRenderer.dispose()
@@ -721,6 +747,9 @@ export class TilesViewerController {
       if (this.tilesetEntries.size > 0 && !this.areAllSourcesSettled()) {
         this.refreshStatus()
       }
+
+      // 刷新调试 HUD（节流），用于观察缩放与 LOD 是否联动
+      this.updateDebugHud()
 
       this.renderer.render(this.scene, this.camera)
     }
@@ -838,7 +867,7 @@ export class TilesViewerController {
    * 为单个数据源创建并配置 TilesRenderer 实例
    *
    * 清晰度策略（尽量贴近 Cesium 的稳定观感）：
-   * - errorTarget=1.0: 比默认 16 更积极地细化几何，接近 Cesium maximumScreenSpaceError=1 的观感
+   * - errorTarget=4: 高清档位，远处整体、放大逐步细化到最细层
    * - 保留 mipmap + 开启各向异性: 斜视角纹理更稳、更清楚
    * - 适度提高 LRU 和处理预算: 减少高精细瓦片的加载迟滞
    *
@@ -854,18 +883,16 @@ export class TilesViewerController {
     // 1. 高清 LOD 核心参数
     // ============================================================
 
-    // 比默认值更积极地追踪高精度 Tile。
-    // 这不是 Cesium maximumScreenSpaceError 的一一对应值，
-    // 但对于“近距离高清”场景，1px 是一个比较激进的测试/生产起点。
+    // 直接使用目标精度 errorTarget：SSE 会按“相机距离”逐步加载更深层瓦片，
+    // 滚动放大时相机靠近 → SSE 误差变大 → 自动细化到更清晰层级。
     tilesRenderer.errorTarget = TILE_QUALITY.errorTarget
 
     // 增大单帧 Tile traversal 预算，避免高清子瓦片已经被发现，
     // 但因为每帧处理预算太小而迟迟不能进入场景。
     tilesRenderer.maxTilesProcessed = TILE_QUALITY.maxTilesProcessed
 
-    // 关闭祖先/同级瓦片的预加载与“占位”行为（详见 TILE_QUALITY 注释）。
-    // 否则 loadAncestors 会在子瓦片未全部就绪时把父瓦片标记为叶子占位，
-    // 导致 LOD 卡在粗粒度层级无法继续下钻。
+    // 关闭 v0.5.1 的占位实验特性（详见 TILE_QUALITY 注释），
+    // 直接由 SSE 按相机距离驱动细化。
     tilesRenderer.loadAncestors = TILE_QUALITY.loadAncestors
     tilesRenderer.loadSiblings = TILE_QUALITY.loadSiblings
 
@@ -956,6 +983,89 @@ export class TilesViewerController {
     entry.renderer.setResolution(this.camera, this.resolutionSize.x, this.resolutionSize.y)
   }
 
+  /**
+   * 创建实时调试 HUD（DOM 覆盖层）。
+   *
+   * 显示相机距离、errorTarget、可见/激活瓦片数。这些数值会随鼠标缩放实时变化：
+   * - 若滚动后“相机距离”不变，说明 OrbitControls 缩放没生效（相机没动）；
+   * - 若距离变了但“可见瓦片”不变，说明 SSE 没有随距离重新调度 LOD。
+   *
+   * @param container - 挂载 HUD 的容器
+   */
+  private createDebugHud(container: HTMLElement): HTMLElement {
+    const hud = document.createElement('div')
+    hud.style.cssText = [
+      'position:absolute',
+      'top:12px',
+      'left:12px',
+      'z-index:20',
+      'padding:8px 10px',
+      'border-radius:6px',
+      'background:rgba(2,6,23,0.72)',
+      'color:#e2e8f0',
+      'font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace',
+      'pointer-events:none',
+      'user-select:none',
+      'white-space:pre',
+    ].join(';')
+
+    // 确保绝对定位相对容器生效
+    if (container.style.position === '') {
+      container.style.position = 'relative'
+    }
+
+    container.appendChild(hud)
+    return hud
+  }
+
+  /** 每帧（节流 ~4Hz）刷新调试 HUD 的文本 */
+  private updateDebugHud(): void {
+    if (!this.debugHud) {
+      return
+    }
+
+    const now = performance.now()
+    if (now - this.debugHudLastUpdate < 250) {
+      return
+    }
+    this.debugHudLastUpdate = now
+
+    const entry = this.tilesetEntries.values().next().value as ManagedTilesetEntry | undefined
+    const stats = entry
+      ? (entry.renderer as unknown as { stats: Record<string, number> }).stats
+      : null
+
+    // 计算可见瓦片的最大深度（直接反映当前 LOD 层级：放大越近，深度应越大）
+    let maxDepth = 0
+    if (entry) {
+      const traverse = entry.renderer.traverse.bind(entry.renderer) as unknown as (
+        before: (tile: { internal: { depth: number }; traversal?: { visible?: boolean } }) => boolean,
+        after: null,
+        ensureFullyProcessed?: boolean,
+      ) => void
+      traverse(
+        (tile) => {
+          if (tile.traversal?.visible) {
+            maxDepth = Math.max(maxDepth, tile.internal.depth)
+          }
+          return false
+        },
+        null,
+        false,
+      )
+    }
+
+    const distance = this.camera.position.distanceTo(this.controls.target)
+    const errorTarget = entry?.renderer.errorTarget ?? Number.NaN
+    const visible = stats?.visible ?? 0
+
+    this.debugHud.textContent =
+      `相机距离: ${distance.toFixed(0)}\n` +
+      `errorTarget: ${Number.isFinite(errorTarget) ? errorTarget.toFixed(2) : '—'}\n` +
+      `可见瓦片: ${visible}\n` +
+      `最大深度: ${maxDepth}`
+  }
+
   // ========== 视口自适应 ==========
 
   /**
@@ -998,7 +1108,8 @@ export class TilesViewerController {
 
     window.clearTimeout(this.fitTimerId)
     this.fitTimerId = window.setTimeout(() => {
-      if (this.tilesetEntries.size === 0) {
+      // 用户已开始手动操作时放弃自动聚焦，避免用 debounce 里的旧聚焦覆盖用户缩放/旋转
+      if (this.hasSettledView || this.tilesetEntries.size === 0) {
         return
       }
 
