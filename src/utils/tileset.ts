@@ -45,7 +45,19 @@ const DEFAULT_SCENE_SOURCES: TilesetSourceConfig[] = [
     name: '地形基底',
     kind: 'terrain',
     url: DEFAULT_TERRAIN_URL,
-  }
+  },
+  // {
+  //   id: 'construction-aux',
+  //   name: '前期施工辅助',
+  //   kind: 'tileset',
+  //   url: './data/fbx-model/outer/前期施工辅助/tileset.json',
+  // },
+  // {
+  //   id: 'hub-structure',
+  //   name: '枢纽工程结构',
+  //   kind: 'tileset',
+  //   url: './data/fbx-model/outer/枢纽工程结构/tileset.json',
+  // },
 ]
 
 /**

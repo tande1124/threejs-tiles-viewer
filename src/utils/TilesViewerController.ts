@@ -18,6 +18,30 @@ import type { TilesetSourceConfig } from '@/utils/tileset'
 const EMPTY_BOX = new THREE.Box3()
 
 /**
+ * 天空背景配色与白云参数。
+ *
+ * 通过一个跟随相机的立方体天空盒（skybox）呈现：
+ * - top：天顶，偏深的天空蓝
+ * - horizon：地平线，灰蓝薄雾，与雾色一致，便于远景地形自然淡入
+ * - bottom：地面以下，暗色，与地形基底 / 旧背景衔接
+ * - fog：雾色，与 horizon 保持一致，避免远景“碎边”突兀
+ * - cloud*：程序化白云参数（详见 createSkyBox）
+ */
+const SKY_BACKGROUND = {
+  top: '#1e6fd9',
+  horizon: '#d8e7f5',
+  bottom: '#0b1526',
+  fog: '#d8e7f5',
+  fogNear: 8000,
+  fogFar: 50000,
+  cloudColor: '#ffffff',
+  /** 云团噪声频率：越大云越碎小 */
+  cloudScale: 3.2,
+  /** 云层浓度（0~1），越大云越白越实 */
+  cloudOpacity: 0.9,
+} as const
+
+/**
  * 3D Tiles 高清调度参数。
  *
  * 说明：
@@ -56,6 +80,17 @@ const TILE_QUALITY = {
   cacheMaxSize: 20000,
   cacheMinBytes: 1024 * 1024 * 1024,
   cacheMaxBytes: 2 * 1024 * 1024 * 1024,
+} as const
+
+/**
+ * 相机缩放范围（相对「初始聚焦距离」的倍数）。
+ *
+ * fitCameraToBox 会先按场景包围盒算出能完整看到模型的初始聚焦距离，
+ * 再据此重设 OrbitControls 的 min/max 缩放距离。maxDistanceFactor 控制用户
+ * 最远能「缩小」多少：倍数越大越能拉远、模型越小。这里取 1.5 倍，避免把模型缩得太小。
+ */
+const ZOOM_LIMITS = {
+  maxDistanceFactor: 1,
 } as const
 
 // ========== 公开接口 ==========
@@ -180,6 +215,8 @@ export class TilesViewerController {
   private readonly tilesetRoot = new THREE.Group()
   /** 标记精灵的父级容器组：经纬度点位图标添加到此节点下 */
   private readonly markerRoot = new THREE.Group()
+  /** 天空盒：跟随相机的渐变立方体天空（含程序化白云），充当自然背景 */
+  private readonly skyBox: THREE.Mesh
   /** DRACO 解压加载器：解码 DRACO 压缩几何体，显著减小模型文件体积 */
   private readonly dracoLoader = new DRACOLoader()
   /** KTX2 纹理加载器：解码 GPU 压缩纹理（Basis Universal 格式），减小 GPU 内存占用 */
@@ -247,8 +284,12 @@ export class TilesViewerController {
     // 配置 DRACO 解码器的 WASM 路径（使用 GLTF 专用配置）
     this.dracoLoader.setDecoderPath(DRACO_GLTF_CONFIG)
 
-    // ---- 场景背景 ----
-    this.scene.background = new THREE.Color('#020617') // 深蓝黑色，与 UI 主题一致
+    // ---- 天空与背景 ----
+    this.skyBox = this.createSkyBox()
+    // 雾：让远景地形淡入地平线，同时遮住 LOD 远处的“碎边”
+    this.scene.fog = new THREE.Fog(new THREE.Color(SKY_BACKGROUND.fog), SKY_BACKGROUND.fogNear, SKY_BACKGROUND.fogFar)
+    // 背景兜底色：天空穹顶未覆盖到的缝隙，用地面暗色补齐（与旧背景一致）
+    this.scene.background = new THREE.Color(SKY_BACKGROUND.bottom)
 
     // ---- 光照系统 ----
 
@@ -289,7 +330,7 @@ export class TilesViewerController {
     this.controls.enableDamping = true       // 启用阻尼惯性（松开鼠标后逐渐减速）
     this.controls.dampingFactor = 0.08       // 阻尼系数（0 = 立刻停止，越大惯性越强）
     this.controls.minDistance = 1            // 最近缩放距离（单位与场景一致）
-    this.controls.maxDistance = 500000       // 最远缩放距离
+    this.controls.maxDistance = 10000        // 最远缩放距离（聚焦前的兜底值，聚焦后按场景尺度重设）
     this.controls.target.set(0, 0, 0)        // 初始视线焦点：场景原点
     // 用户一旦手动操作相机（旋转/缩放/平移），立刻禁止后续所有自动聚焦
     this.controls.addEventListener('start', () => {
@@ -301,6 +342,116 @@ export class TilesViewerController {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace            // sRGB 色彩空间，保证颜色一致
     this.renderer.toneMapping = THREE.NoToneMapping                   // 更接近 Cesium 的直接色彩输出
     this.renderer.toneMappingExposure = 1
+  }
+
+  /**
+   * 创建跟随相机的渐变立方体天空盒（含程序化白云）。
+   *
+   * 实现要点：
+   * - 使用一个大型立方体（BackSide + depthWrite:false），仅填充背景，不遮挡地形。
+   * - 立方体以相机为中心，顶点在物体空间的坐标即指向该方向的向量，归一化后
+   *   作为采样方向，等价于 cubemap 的逐方向采样。
+   * - 基础颜色按方向的 Y 分量做三段渐变（天顶 → 地平线 → 地面以下）。
+   * - 白云通过 3D fbm 噪声在地平线以上采样生成：按方向向量的高频噪声取云密度，
+   *   再用 smoothstep 阈值化出云团边缘，贴近地平线处淡出，避免云“贴地”的违和感。
+   * - 渲染循环中每帧把天空盒位置同步到相机位置，保证任意缩放距离下背景始终环绕视角。
+   */
+  private createSkyBox(): THREE.Mesh {
+    const material = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      uniforms: {
+        topColor: { value: new THREE.Color(SKY_BACKGROUND.top) },
+        horizonColor: { value: new THREE.Color(SKY_BACKGROUND.horizon) },
+        bottomColor: { value: new THREE.Color(SKY_BACKGROUND.bottom) },
+        cloudColor: { value: new THREE.Color(SKY_BACKGROUND.cloudColor) },
+        cloudScale: { value: SKY_BACKGROUND.cloudScale },
+        cloudOpacity: { value: SKY_BACKGROUND.cloudOpacity },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vDirection;
+        void main() {
+          // 立方体以相机为中心，物体空间坐标 position 即为指向该顶点的方向向量
+          vDirection = position;
+          gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 topColor;
+        uniform vec3 horizonColor;
+        uniform vec3 bottomColor;
+        uniform vec3 cloudColor;
+        uniform float cloudScale;
+        uniform float cloudOpacity;
+        varying vec3 vDirection;
+
+        // 3D 哈希 → 值噪声，用于程序化云团
+        float hash3(vec3 p) {
+          p = fract(p * 0.3183099 + 0.1);
+          p *= 17.0;
+          return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+        }
+
+        float valueNoise3(vec3 p) {
+          vec3 i = floor(p);
+          vec3 f = fract(p);
+          vec3 u = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(
+              mix(hash3(i + vec3(0.0, 0.0, 0.0)), hash3(i + vec3(1.0, 0.0, 0.0)), u.x),
+              mix(hash3(i + vec3(0.0, 1.0, 0.0)), hash3(i + vec3(1.0, 1.0, 0.0)), u.x),
+              u.y
+            ),
+            mix(
+              mix(hash3(i + vec3(0.0, 0.0, 1.0)), hash3(i + vec3(1.0, 0.0, 1.0)), u.x),
+              mix(hash3(i + vec3(0.0, 1.0, 1.0)), hash3(i + vec3(1.0, 1.0, 1.0)), u.x),
+              u.y
+            ),
+            u.z
+          );
+        }
+
+        float fbm3(vec3 p) {
+          float value = 0.0;
+          float amplitude = 0.5;
+          for (int i = 0; i < 5; i++) {
+            value += amplitude * valueNoise3(p);
+            p = p * 2.03 + vec3(17.1, 9.7, 5.3);
+            amplitude *= 0.5;
+          }
+          return value;
+        }
+
+        void main() {
+          vec3 dir = normalize(vDirection);
+          float h = dir.y;
+
+          // 基础三段垂直渐变
+          vec3 color = h >= 0.0
+            ? mix(horizonColor, topColor, pow(h, 0.6))
+            : mix(horizonColor, bottomColor, pow(-h, 0.6));
+
+          // 白云：仅在地平线以上采样，地平线附近淡出
+          if (h > 0.0) {
+            float density = fbm3(dir * cloudScale);
+            float cloud = smoothstep(0.5, 0.78, density);
+            cloud *= smoothstep(0.0, 0.18, h);
+            color = mix(color, cloudColor, cloud * cloudOpacity);
+          }
+
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `,
+    })
+
+    // 立方体半边长 = 50000 / √3，使八个顶点恰好落在原球体半径 50000 处，
+    // 保证天空盒的最远角与旧球体表面一样远，不会因为远裁剪面偏小被裁掉。
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(57735, 57735, 57735), material)
+    mesh.name = 'sky-box'
+    mesh.frustumCulled = false   // 立方体跟随相机，关闭视锥剔除避免误裁
+    mesh.renderOrder = -1000     // 先绘制天空，地形/模型随后覆盖
+    this.scene.add(mesh)
+    return mesh
   }
 
   // ========== 公共方法 ==========
@@ -751,6 +902,9 @@ export class TilesViewerController {
       // 刷新调试 HUD（节流），用于观察缩放与 LOD 是否联动
       this.updateDebugHud()
 
+      // 天空盒跟随相机，保证无论缩放到多远背景始终环绕当前视角
+      this.skyBox.position.copy(this.camera.position)
+
       this.renderer.render(this.scene, this.camera)
     }
 
@@ -1153,10 +1307,12 @@ export class TilesViewerController {
     // 根据 FOV 和包围盒大小计算最佳观察距离
     const halfFov = THREE.MathUtils.degToRad(this.camera.fov * 0.5)
     const distance = safeDimension / (2 * Math.tan(halfFov))
+    // 初始聚焦距离：相机到包围盒中心的实际距离（含 1.65 倍呼吸空间）
+    const fitDistance = distance * 1.65
 
     // 相机偏移方向：(1.2, 0.9, 1.4) 表示偏向右侧 + 上方 + 前方，
     // 1.65 倍距离确保模型周围有足够的视觉呼吸空间
-    const offset = new THREE.Vector3(1.2, 0.9, 1.4).normalize().multiplyScalar(distance * 1.65)
+    const offset = new THREE.Vector3(1.2, 0.9, 1.4).normalize().multiplyScalar(fitDistance)
 
     this.camera.position.copy(center).add(offset)
     // 动态调整裁剪面范围，与场景尺度匹配
@@ -1166,7 +1322,9 @@ export class TilesViewerController {
 
     // 同步更新轨道控制器参数
     this.controls.minDistance = Math.max(safeDimension / 200, 1)
-    this.controls.maxDistance = Math.max(safeDimension * 25, 500000)
+    // 限制「缩小」程度：最远只能缩到初始聚焦距离的 maxDistanceFactor 倍，
+    // 并保证至少能容纳完整场景（safeDimension），避免把模型缩得太小。
+    this.controls.maxDistance = Math.max(fitDistance * ZOOM_LIMITS.maxDistanceFactor, safeDimension)
     this.controls.target.copy(center)
     this.controls.update()
 
