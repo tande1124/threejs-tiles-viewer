@@ -30,7 +30,8 @@ export interface DefaultSceneConfig {
  * 优先读取环境变量 VITE_DEFAULT_TILESET，未配置时回退到 public 目录下的本地数据
  */
 export const DEFAULT_TERRAIN_URL =
-  import.meta.env.VITE_DEFAULT_TILESET || './data/3dtiles/tileset.json'
+   './data/jfs/data/tileset.json'
+    // import.meta.env.VITE_DEFAULT_TILESET || './data/3dtiles/tileset.json'
 
 /**
  * 默认组合场景的数据源列表

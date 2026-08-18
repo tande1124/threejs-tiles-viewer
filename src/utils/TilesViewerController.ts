@@ -7,6 +7,7 @@ import { GLTFExtensionsPlugin, ReorientationPlugin } from '3d-tiles-renderer/thr
 import { disposeObject3D } from '@/utils/three-dispose'
 import { createKtx2MimeTypePlugin } from '@/utils/ktx2MimeTypePlugin'
 import { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
+import { GltfModelLoader, type GltfLoadOptions } from '@/utils/GltfModelLoader'
 import type { TilesetSourceConfig } from '@/utils/tileset'
 
 // ========== 配置常量 ==========
@@ -31,9 +32,13 @@ const SKY_BACKGROUND = {
 const TILE_QUALITY = {
   errorTarget: 4,
   maxTilesProcessed: 4000,
-  // v0.5.1 的占位实验特性会让 LOD 卡在粗层级，保持关闭
-  loadSiblings: false,
-  loadAncestors: false,
+  // 重新开启祖先/同级瓦片加载。
+  // node_modules 中的 3d-tiles-renderer 已本地修补 v0.5.1 的占位逻辑：
+  // 空占位瓦片（empty.glb）不再让父级 allChildrenLoaded 永久为 false，
+  // 外部 tileset（.json）加载中也不会被误判为占位，因此不再卡 LOD；
+  // 开启后子瓦片未就绪时父级会占位显示，放大/平移不再出现缺失区域。
+  loadSiblings: true,
+  loadAncestors: true,
   maxDepth: 64,
   cacheMinSize: 12000,
   cacheMaxSize: 20000,
@@ -109,6 +114,7 @@ export class TilesViewerController {
   private readonly timer = new THREE.Timer()
   private readonly tilesetRoot = new THREE.Group()
   private readonly markerRoot = new THREE.Group()
+  private readonly gltfModelLoader: GltfModelLoader
   private readonly skyBox: THREE.Mesh
   private readonly dracoLoader = new DRACOLoader()
   private readonly ktx2Loader = new KTX2Loader()
@@ -169,6 +175,14 @@ export class TilesViewerController {
     this.markerRoot.name = 'marker-root'
     this.scene.add(this.tilesetRoot)
     this.scene.add(this.markerRoot)
+
+    // GLTF/GLB 模型加载器：维护独立的 gltf-root 容器，复用 DRACO/KTX2 解压
+    this.gltfModelLoader = new GltfModelLoader({
+      scene: this.scene,
+      dracoLoader: this.dracoLoader,
+      ktx2Loader: this.ktx2Loader,
+      enhanceTextures: (model) => this.enhanceModelTextures(model),
+    })
 
     this.pointMarkerRenderer = new PointMarkerRenderer({
       tilesetRoot: this.tilesetRoot,
@@ -371,6 +385,29 @@ export class TilesViewerController {
   /** 清除经纬度定位点 */
   clearLonLatPoint(): void {
     this.pointMarkerRenderer.clear()
+  }
+
+  /**
+   * 在场景中直接加载并渲染一个 GLTF/GLB 模型（委托给 GltfModelLoader）。
+   *
+   * @param url - 模型资源地址，如 './data/gltf/jfs-bim.glb'
+   * @param options.center - 是否把模型包围盒中心移到原点（默认 true，避免大坐标精度问题）
+   * @param options.fitCamera - 加载完成后是否自动聚焦相机到包含模型在内的场景（默认 true）
+   * @returns 加载完成的模型根节点（THREE.Group）
+   */
+  async loadGltf(
+    url: string,
+    options: GltfLoadOptions & { fitCamera?: boolean } = {},
+  ): Promise<THREE.Group> {
+    const model = await this.gltfModelLoader.load(url, options)
+
+    if (options.fitCamera !== false) {
+      // 允许自动聚焦，让相机对准包含 GLTF 模型在内的整个场景
+      this.hasSettledView = false
+      this.scheduleCameraFit()
+    }
+
+    return model
   }
 
   /** 查找地形 tileset 的 group（供 ECEF → 局部坐标变换使用） */
@@ -853,7 +890,7 @@ export class TilesViewerController {
 
   // ========== 相机聚焦 ==========
 
-  /** 延迟聚焦（防抖 160ms），用户已手动操作则跳过 */
+  /** 延迟用最新加载的地形几何体重新贴地点位（防抖） */
   private schedulePointGrounding(delay = 160): void {
     window.clearTimeout(this.groundingTimerId)
     this.groundingTimerId = window.setTimeout(() => {
@@ -862,16 +899,17 @@ export class TilesViewerController {
     }, delay)
   }
 
-  /** 延迟用最新加载的地形几何体重新贴地点位 */
+  /** 延迟触发相机自动聚焦（防抖 160ms），用户已手动操作则跳过 */
   private scheduleCameraFit(): void {
     if (this.hasSettledView) return
 
     window.clearTimeout(this.fitTimerId)
     this.fitTimerId = window.setTimeout(() => {
-      if (this.hasSettledView || this.tilesetEntries.size === 0) return
+      if (this.hasSettledView) return
 
       this.tilesetRoot.updateMatrixWorld(true)
       const box = new THREE.Box3().setFromObject(this.tilesetRoot)
+      box.union(new THREE.Box3().setFromObject(this.gltfModelLoader.root))
       const targetBox = box.isEmpty() ? this.metadataSceneBounds : box
       const didFit = !targetBox.isEmpty() && this.fitCameraToBox(targetBox)
 

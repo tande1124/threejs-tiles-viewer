@@ -65,6 +65,12 @@ export default defineComponent({
       } catch (error) {
         console.error('默认 3DTiles 场景加载失败。', error)
       }
+
+      try {
+        await this.loadDefaultGltf()
+      } catch (error) {
+        console.error('GLTF 模型加载失败。', error)
+      }
     },
 
     handleStatusChange(status: ViewerStatus) {
@@ -77,6 +83,12 @@ export default defineComponent({
     async loadDefaultScene() {
       if (!this.controller) return
       await this.controller.loadScene(this.defaultSceneConfig.sources)
+    },
+
+    /** 直接加载默认 GLTF 模型到场景 */
+    async loadDefaultGltf() {
+      if (!this.controller) return
+      await this.controller.loadGltf('./data/gltf/jfs-bim.glb')
     },
 
     /** 处理表单提交的经纬度，渲染点位并自动飞行定位 */
