@@ -16,7 +16,7 @@ const WGS84_E2 = WGS84_F * (2 - WGS84_F)
  * 用于在 ECEF（地心地固坐标系）与场景局部坐标系之间做转换
  */
 export interface SceneTransformReference {
-  /** ECEF → 场景局部空间的变换矩阵（通常来自地形 tileset 的 root.transform） */
+  /** ECEF → 场景局部空间的变换矩阵 */
   matrix: THREE.Matrix4
   /** 场景局部空间 → ECEF 的逆变换矩阵 */
   inverseMatrix: THREE.Matrix4
@@ -38,7 +38,7 @@ export interface LonLatCoordinate {
  * 根据 tileset.json 的 root.transform 矩阵创建场景变换参考对象
  *
  * 3D Tiles 的 root.transform 是一个 4×4 矩阵，定义了从瓦片局部空间到
- * ECEF 坐标系的变换。此函数将其封装为矩阵 + 逆矩阵，供后续坐标转换使用。
+ * ECEF 坐标系的变换。因此需要使用它的逆矩阵完成 ECEF → 场景局部坐标转换。
  *
  * @param transform - tileset.json 中 root.transform 的 16 个元素数组（列主序）
  * @returns 包含正向和逆向矩阵的引用对象
@@ -52,9 +52,11 @@ export function createSceneTransformReference(transform?: number[]): SceneTransf
     matrix.identity()
   }
 
+  const ecefToSceneMatrix = matrix.clone().invert()
+
   return {
-    matrix,
-    inverseMatrix: matrix.clone().invert(),
+    matrix: ecefToSceneMatrix,
+    inverseMatrix: matrix,
   }
 }
 
@@ -109,8 +111,8 @@ export function lonLatHeightToEcef(
 /**
  * 将 ECEF 坐标转换为场景局部空间坐标
  *
- * 通过地形变换矩阵的逆矩阵，将 ECEF 全局坐标映射到
- * 场景原点附近的局部坐标空间。
+ * 通过 ECEF → 场景矩阵（root.transform 的逆矩阵），将 ECEF 全局坐标
+ * 映射到场景原点附近的局部坐标空间。
  *
  * @param ecef - ECEF 坐标向量
  * @param reference - 场景变换参考对象（来自地形基底的数据）
@@ -120,7 +122,37 @@ export function ecefToScenePosition(
   ecef: THREE.Vector3,
   reference: SceneTransformReference,
 ): THREE.Vector3 {
-  return ecef.clone().applyMatrix4(reference.inverseMatrix)
+  return ecef.clone().applyMatrix4(reference.matrix)
+}
+
+/**
+ * 将 ECEF 坐标系中的方向转换到场景局部坐标系。
+ *
+ * 与点坐标转换不同，方向向量不会应用平移，因此使用 transformDirection。
+ */
+export function ecefDirectionToScene(
+  direction: THREE.Vector3,
+  ecefToSceneMatrix: THREE.Matrix4,
+): THREE.Vector3 {
+  return direction.clone().transformDirection(ecefToSceneMatrix)
+}
+
+/**
+ * 获取 WGS84 椭球面在指定经纬度处的外法线方向（ECEF 坐标系）。
+ *
+ * 该方向用于在使用 ReorientationPlugin 后计算场景中的“向上”方向，
+ * 不应直接使用 ECEF 的固定坐标轴作为局部地表法线。
+ */
+export function lonLatToEcefUp(longitude: number, latitude: number): THREE.Vector3 {
+  const longitudeRad = THREE.MathUtils.degToRad(longitude)
+  const latitudeRad = THREE.MathUtils.degToRad(latitude)
+  const cosLatitude = Math.cos(latitudeRad)
+
+  return new THREE.Vector3(
+    cosLatitude * Math.cos(longitudeRad),
+    cosLatitude * Math.sin(longitudeRad),
+    Math.sin(latitudeRad),
+  ).normalize()
 }
 
 // ========== 经纬度 → 场景局部坐标（组合转换）==========

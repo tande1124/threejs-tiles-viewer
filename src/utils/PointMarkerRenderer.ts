@@ -1,5 +1,10 @@
 import * as THREE from 'three'
-import { lonLatHeightToEcef } from '@/utils/geo-coordinate'
+import {
+  ecefDirectionToScene,
+  ecefToScenePosition,
+  lonLatHeightToEcef,
+  lonLatToEcefUp,
+} from '@/utils/geo-coordinate'
 
 /** 经纬度点位精灵图标资源路径 */
 const POINT_ICON_URL = '/img/boxCamera.svg'
@@ -51,6 +56,12 @@ export class PointMarkerRenderer {
   private pointTexture: THREE.Texture | null = null
   /** 点位纹理的加载 Promise（防止重复加载） */
   private pointTexturePromise: Promise<THREE.Texture> | null = null
+  /** 当前点位坐标，用于瓦片加载后重新贴地 */
+  private activeCoordinate: {
+    longitude: number
+    latitude: number
+    height: number | undefined
+  } | null = null
 
   constructor(options: PointMarkerRendererOptions) {
     this.tilesetRoot = options.tilesetRoot
@@ -64,7 +75,8 @@ export class PointMarkerRenderer {
    *
    * ## 渲染流程
    *
-   * 1. 将 (lon, lat, height) 转换为 ECEF，再通过地形 group 的 worldMatrix 映射到场景世界坐标
+   * 1. 将 (lon, lat, height) 转换为 ECEF，再通过 ReorientationPlugin 生成的
+   *    ECEF → 场景矩阵映射到场景坐标
    * 2. 计算标记图标的缩放比例（像素 → 世界单位）
    * 3. 若未提供高程，用射线检测将位置贴合到 3DTiles 模型/地形表面（自动贴地）
    * 4. 创建 Sprite 精灵并添加到 markerRoot 中
@@ -84,10 +96,16 @@ export class PointMarkerRenderer {
     // 确保世界矩阵最新，再读取地形 group 的变换
     this.tilesetRoot.updateMatrixWorld(true)
 
-    // 步骤 1: WGS84 → ECEF → 世界坐标（通过 terrain group 的实际 worldMatrix）。
+    // 步骤 1: WGS84 → ECEF → 场景坐标。
+    // ReorientationPlugin 会将 terrainGroup.matrixWorld 设置为 ECEF → 场景的矩阵，
+    // 不能把 root.transform（局部 → ECEF）直接用于这里。
     // 未提供高程时先按椭球面（height=0）计算近似位置，后续再通过射线检测贴到模型表面。
-    const ecef = lonLatHeightToEcef(longitude, latitude, height ?? 0)
-    const approximatePosition = ecef.clone().applyMatrix4(terrainGroup.matrixWorld)
+    const { approximatePosition, worldUp } = this.getApproximateScenePoint(
+      longitude,
+      latitude,
+      height,
+      terrainGroup,
+    )
 
     const markerScale = this.getMarkerScale()
 
@@ -96,7 +114,12 @@ export class PointMarkerRenderer {
     // - 提供了高程：直接使用该高程对应的位置
     const pointPosition =
       height === undefined
-        ? this.resolveGroundedPosition(approximatePosition, markerScale, terrainGroup)
+        ? this.resolveGroundedPosition(
+            approximatePosition,
+            markerScale,
+            worldUp,
+            terrainGroup,
+          ) ?? approximatePosition.clone()
         : approximatePosition.clone()
 
     const pointTexture = await this.ensurePointTexture()
@@ -122,6 +145,7 @@ export class PointMarkerRenderer {
 
     this.markerRoot.add(pointSprite)
     this.pointSprite = pointSprite
+    this.activeCoordinate = { longitude, latitude, height }
 
     return pointPosition.clone()
   }
@@ -138,6 +162,7 @@ export class PointMarkerRenderer {
     this.markerRoot.remove(this.pointSprite)
     this.pointSprite.material.dispose()
     this.pointSprite = null
+    this.activeCoordinate = null
   }
 
   /**
@@ -152,6 +177,63 @@ export class PointMarkerRenderer {
       this.pointTexture = null
       this.pointTexturePromise = null
     }
+  }
+
+  /**
+   * 使用当前已加载的地形重新贴地点位。
+   *
+   * 点位首次渲染时，目标区域的高精度瓦片可能尚未加载；相机飞行后
+   * TilesRenderer 会继续请求目标区域，此方法用于用新到达的几何体修正位置。
+   */
+  refreshGrounding(): void {
+    const sprite = this.pointSprite
+    const coordinate = this.activeCoordinate
+    const terrainGroup = this.getTerrainGroup()
+
+    if (!sprite || !coordinate || coordinate.height !== undefined || !terrainGroup) {
+      return
+    }
+
+    this.tilesetRoot.updateMatrixWorld(true)
+    const { approximatePosition, worldUp } = this.getApproximateScenePoint(
+      coordinate.longitude,
+      coordinate.latitude,
+      undefined,
+      terrainGroup,
+    )
+    const groundedPosition = this.resolveGroundedPosition(
+      approximatePosition,
+      this.getMarkerScale(),
+      worldUp,
+      terrainGroup,
+    )
+
+    if (groundedPosition) {
+      sprite.position.copy(groundedPosition)
+    }
+  }
+
+  /**
+   * 计算经纬度对应的 ECEF → 场景位置和局部向上方向。
+   */
+  private getApproximateScenePoint(
+    longitude: number,
+    latitude: number,
+    height: number | undefined,
+    terrainGroup: THREE.Group,
+  ): { approximatePosition: THREE.Vector3; worldUp: THREE.Vector3 } {
+    const ecef = lonLatHeightToEcef(longitude, latitude, height ?? 0)
+    const ecefToSceneMatrix = terrainGroup.matrixWorld
+    const approximatePosition = ecefToScenePosition(ecef, {
+      matrix: ecefToSceneMatrix,
+      inverseMatrix: ecefToSceneMatrix.clone().invert(),
+    })
+    const worldUp = ecefDirectionToScene(
+      lonLatToEcefUp(longitude, latitude),
+      ecefToSceneMatrix,
+    )
+
+    return { approximatePosition, worldUp }
   }
 
   /**
@@ -170,7 +252,7 @@ export class PointMarkerRenderer {
   /**
    * 通过射线检测将近似位置修正到 3DTiles 模型/地形表面（自动贴地）
    *
-   * 从目标点正上方沿 up 轴向下发射射线，与 tilesetRoot 中所有子物体求交，
+   * 从目标点正上方沿 up 轴向下发射射线，与地形 group 中已加载的子物体求交，
    * 取第一个有效交点后向上偏移一小段距离（避免和表面发生 z-fighting）。
    *
    * 射线起点会抬到足够高的位置，确保始终高于任何地形/模型，避免因起点
@@ -178,39 +260,51 @@ export class PointMarkerRenderer {
    *
    * @param approximatePosition - 经纬度转换后的近似世界坐标（椭球面附近）
    * @param markerScale - 标记精灵的世界单位尺寸
-   * @param terrainGroup - 地形 tileset 的 group，用于推算 up 方向
-   * @returns 修正后的精确贴合坐标；未命中时回退到近似位置
+   * @param worldUp - 当前经纬度处的场景向上方向
+   * @param terrainGroup - 仅用于贴地检测的地形 tileset group
+   * @returns 修正后的精确贴合坐标；未命中时返回 null
    */
   private resolveGroundedPosition(
     approximatePosition: THREE.Vector3,
     markerScale: number,
+    worldUp: THREE.Vector3,
     terrainGroup: THREE.Group,
-  ): THREE.Vector3 {
+  ): THREE.Vector3 | null {
     // 更新世界矩阵，确保射线检测基于最新的几何体位置
     this.tilesetRoot.updateMatrixWorld(true)
 
-    // ReorientationPlugin(+z, OBJECT_FRAME) 会将 +Z 旋转为 +Y（Three.js 标准 up 轴）。
-    // 地形 group 的局部 up 轴在 worldSpace 中对应其 local +Y 方向。
-    const worldUp = new THREE.Vector3(0, 1, 0).applyQuaternion(terrainGroup.quaternion)
-
-    // 射线起点：目标点上方 rayHeight 处（沿 up 方向移动）。
-    // 高度取「场景尺度的 1.5 倍 / 精灵尺寸的 20 倍 / 5km」三者最大，
-    // 保证起点高于任何地表，射线能自上而下稳定命中模型表面。
-    const rayHeight = Math.max(this.getSceneScaleHint() * 1.5, markerScale * 20, 5000)
+    // 射线起点至少高于当前地形包围盒，避免目标点位于高程较高的地形时
+    // 射线起点仍埋在模型内部。额外留出标记尺寸和场景尺度的安全余量。
+    const terrainBounds = new THREE.Box3().setFromObject(terrainGroup)
+    const terrainCenter = terrainBounds.getCenter(new THREE.Vector3())
+    const terrainHalfSize = terrainBounds.getSize(new THREE.Vector3()).multiplyScalar(0.5)
+    const terrainMaxProjection = terrainCenter.dot(worldUp) +
+      Math.abs(terrainHalfSize.x * worldUp.x) +
+      Math.abs(terrainHalfSize.y * worldUp.y) +
+      Math.abs(terrainHalfSize.z * worldUp.z)
+    const pointProjection = approximatePosition.dot(worldUp)
+    const boundsClearance = terrainBounds.isEmpty()
+      ? 0
+      : Math.max(0, terrainMaxProjection - pointProjection)
+    const rayHeight = Math.max(
+      boundsClearance + markerScale * 20,
+      this.getSceneScaleHint() * 1.5,
+      5000,
+    )
     const rayOrigin = approximatePosition.clone().addScaledVector(worldUp, rayHeight)
-    // 射线方向：沿 up 的反方向向下
     const rayDirection = worldUp.clone().negate()
 
     this.raycaster.set(rayOrigin, rayDirection)
-    this.raycaster.far = rayHeight * 2 // 射程上限为起点的两倍高度
+    this.raycaster.near = 0
+    this.raycaster.far = rayHeight + Math.max(this.getSceneScaleHint(), 5000)
 
-    // 与 tilesetRoot 下所有子对象（递归）进行交叉检测
-    const intersections = this.raycaster.intersectObjects(this.tilesetRoot.children, true)
-    const hit = intersections.find((intersection) => intersection.distance >= 0)
+    // 只检测地形，避免建筑模型或其他 tileset 抢先命中，导致点位悬浮。
+    const intersections = this.raycaster.intersectObject(terrainGroup, true)
+    const hit = intersections[0]
 
     if (!hit) {
-      // 没有命中任何表面（例如该经纬度处的瓦片尚未加载），使用近似位置作为回退
-      return approximatePosition
+      // 没有命中任何表面（例如该经纬度处的瓦片尚未加载），交给调用方决定回退策略。
+      return null
     }
 
     // 命中后在交点上沿 up 方向添加微小偏移（精灵高度的 12%），

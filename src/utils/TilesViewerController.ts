@@ -121,6 +121,7 @@ export class TilesViewerController {
   private readonly tilesetEntries = new Map<string, ManagedTilesetEntry>()
   private animationFrameId = 0
   private fitTimerId = 0
+  private groundingTimerId = 0
   private hasSettledView = false
   private hasAutoLoggedDiagnostics = false
   private debugHud: HTMLElement | null = null
@@ -363,6 +364,8 @@ export class TilesViewerController {
   async renderLonLatPoint(longitude: number, latitude: number, height?: number): Promise<void> {
     const pointPosition = await this.pointMarkerRenderer.render(longitude, latitude, height)
     this.flyTo(pointPosition)
+    // 相机飞行后会触发目标区域瓦片加载，稍后再用新几何体校正贴地点位。
+    this.schedulePointGrounding(1000)
   }
 
   /** 清除经纬度定位点 */
@@ -569,6 +572,7 @@ export class TilesViewerController {
     }
 
     window.clearTimeout(this.fitTimerId)
+    window.clearTimeout(this.groundingTimerId)
     cancelAnimationFrame(this.animationFrameId)
     this.debugHud?.remove()
     this.debugHud = null
@@ -628,7 +632,9 @@ export class TilesViewerController {
 
   private clearSceneSources(): void {
     window.clearTimeout(this.fitTimerId)
+    window.clearTimeout(this.groundingTimerId)
     this.fitTimerId = 0
+    this.groundingTimerId = 0
 
     for (const entry of this.tilesetEntries.values()) {
       this.disposeTilesetEntry(entry)
@@ -665,6 +671,7 @@ export class TilesViewerController {
         entry.hasContent = true
         this.enhanceModelTextures(event.scene)
         this.scheduleCameraFit()
+        this.schedulePointGrounding()
         this.refreshStatus()
       },
       tilesLoadEnd: () => {
@@ -672,6 +679,7 @@ export class TilesViewerController {
         entry.settled = true
         entry.hasContent = entry.hasContent || entry.renderer.group.children.length > 0
         this.scheduleCameraFit()
+        this.schedulePointGrounding()
         this.refreshStatus()
 
         if (!this.hasAutoLoggedDiagnostics) {
@@ -846,6 +854,15 @@ export class TilesViewerController {
   // ========== 相机聚焦 ==========
 
   /** 延迟聚焦（防抖 160ms），用户已手动操作则跳过 */
+  private schedulePointGrounding(delay = 160): void {
+    window.clearTimeout(this.groundingTimerId)
+    this.groundingTimerId = window.setTimeout(() => {
+      this.groundingTimerId = 0
+      this.pointMarkerRenderer.refreshGrounding()
+    }, delay)
+  }
+
+  /** 延迟用最新加载的地形几何体重新贴地点位 */
   private scheduleCameraFit(): void {
     if (this.hasSettledView) return
 
