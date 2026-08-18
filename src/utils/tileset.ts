@@ -30,8 +30,7 @@ export interface DefaultSceneConfig {
  * 优先读取环境变量 VITE_DEFAULT_TILESET，未配置时回退到 public 目录下的本地数据
  */
 export const DEFAULT_TERRAIN_URL =
-   './data/jfs/data/tileset.json'
-    // import.meta.env.VITE_DEFAULT_TILESET || './data/3dtiles/tileset.json'
+    import.meta.env.VITE_DEFAULT_TILESET || './data/3dtiles/tileset.json'
 
 /**
  * 默认组合场景的数据源列表
@@ -46,19 +45,7 @@ const DEFAULT_SCENE_SOURCES: TilesetSourceConfig[] = [
     name: '地形基底',
     kind: 'terrain',
     url: DEFAULT_TERRAIN_URL,
-  },
-  // {
-  //   id: 'construction-aux',
-  //   name: '前期施工辅助',
-  //   kind: 'tileset',
-  //   url: './data/fbx-model/outer/前期施工辅助/tileset.json',
-  // },
-  // {
-  //   id: 'hub-structure',
-  //   name: '枢纽工程结构',
-  //   kind: 'tileset',
-  //   url: './data/fbx-model/outer/枢纽工程结构/tileset.json',
-  // },
+  }
 ]
 
 /**

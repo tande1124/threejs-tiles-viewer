@@ -78,9 +78,9 @@ export default defineComponent({
   emits: ['submit', 'clear'],
   data() {
     return {
-      longitudeInput: '98.348344',
-      latitudeInput: '29.65326',
-      heightInput: '2740',
+      longitudeInput: '113.63908',
+      latitudeInput: '35.611931',
+      heightInput: '1505.4',
       validationError: '',
     }
   },

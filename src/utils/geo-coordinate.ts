@@ -155,6 +155,228 @@ export function lonLatToEcefUp(longitude: number, latitude: number): THREE.Vecto
   ).normalize()
 }
 
+// ========== CGCS2000 高斯-克吕格投影 ==========
+
+/**
+ * 高斯-克吕格投影反算：CGCS2000（GRS80 椭球）平面坐标 → 经纬度（度）。
+ *
+ * 用于把建模初期提供的 CGCS2000 平面偏移参数（如 offsetX/offsetY）换算成
+ * 经纬度，再交给 lonLatHeightToEcef 转 ECEF。
+ *
+ * @param easting - 东坐标（米，含 500000 假东）
+ * @param northing - 北坐标（米）
+ * @param centralMeridianDeg - 中央子午线经度（度），如 3° 带 114°E
+ * @returns 经纬度（度）
+ */
+export function gaussKrugerInverse(
+  easting: number,
+  northing: number,
+  centralMeridianDeg: number,
+): { longitude: number; latitude: number } {
+  const a = 6378137 // CGCS2000 / GRS80 长半轴
+  const f = 1 / 298.257222101 // GRS80 扁率
+  const e2 = f * (2 - f)
+  const e4 = e2 * e2
+  const e6 = e2 * e2 * e2
+  const ep2 = e2 / (1 - e2)
+
+  const x = easting - 500000 // 假东 500000
+  const y = northing // 假北 0
+  const k0 = 1
+
+  // 底点纬度（footprint latitude）
+  const m = y / k0
+  const e1 = (1 - Math.sqrt(1 - e2)) / (1 + Math.sqrt(1 - e2))
+  const mu = m / (a * (1 - e2 / 4 - (3 * e4) / 64 - (5 * e6) / 256))
+  const phi1 =
+    mu +
+    ((3 * e1) / 2 - (27 * e1 ** 3) / 32) * Math.sin(2 * mu) +
+    ((21 * e1 ** 2) / 16 - (55 * e1 ** 4) / 32) * Math.sin(4 * mu) +
+    ((151 * e1 ** 3) / 96) * Math.sin(6 * mu) +
+    ((1097 * e1 ** 4) / 512) * Math.sin(8 * mu)
+
+  const sinPhi1 = Math.sin(phi1)
+  const cosPhi1 = Math.cos(phi1)
+  const tanPhi1 = Math.tan(phi1)
+  const c1 = ep2 * cosPhi1 * cosPhi1
+  const t1 = tanPhi1 * tanPhi1
+  const n1 = a / Math.sqrt(1 - e2 * sinPhi1 * sinPhi1)
+  const r1 = (a * (1 - e2)) / (1 - e2 * sinPhi1 * sinPhi1) ** 1.5
+  const d = x / (n1 * k0)
+
+  const latitude =
+    phi1 -
+    ((n1 * tanPhi1) / r1) *
+      (d ** 2 / 2 -
+        ((5 + 3 * t1 + 10 * c1 - 4 * c1 * c1 - 9 * ep2) * d ** 4) / 24 +
+        ((61 + 90 * t1 + 298 * c1 + 45 * t1 * t1 - 252 * ep2 - 3 * c1 * c1) * d ** 6) / 720)
+
+  const longitude =
+    THREE.MathUtils.degToRad(centralMeridianDeg) +
+    (d -
+      ((1 + 2 * t1 + c1) * d ** 3) / 6 +
+      ((5 - 2 * c1 + 28 * t1 - 3 * c1 * c1 + 8 * ep2 + 24 * t1 * t1) * d ** 5) / 120) /
+      cosPhi1
+
+  return {
+    longitude: THREE.MathUtils.radToDeg(longitude),
+    latitude: THREE.MathUtils.radToDeg(latitude),
+  }
+}
+
+/**
+ * 高斯-克吕格投影正算：CGCS2000（GRS80 椭球）经纬度 → 平面坐标（含 500000 假东）。
+ * 与 gaussKrugerInverse 互逆，用于把场景点击位置换算成 CGCS2000 大坐标。
+ *
+ * @param longitude - 经度（度）
+ * @param latitude - 纬度（度）
+ * @param centralMeridianDeg - 中央子午线经度（度）
+ * @returns 平面坐标（米）
+ */
+export function gaussKrugerForward(
+  longitude: number,
+  latitude: number,
+  centralMeridianDeg: number,
+): { easting: number; northing: number } {
+  const a = 6378137
+  const f = 1 / 298.257222101 // CGCS2000 / GRS80
+  const e2 = f * (2 - f)
+  const e4 = e2 * e2
+  const e6 = e2 * e2 * e2
+  const ep2 = e2 / (1 - e2)
+
+  const lon0 = THREE.MathUtils.degToRad(centralMeridianDeg)
+  const lon = THREE.MathUtils.degToRad(longitude)
+  const lat = THREE.MathUtils.degToRad(latitude)
+
+  const sinLat = Math.sin(lat)
+  const cosLat = Math.cos(lat)
+  const tanLat = Math.tan(lat)
+  const n = a / Math.sqrt(1 - e2 * sinLat * sinLat)
+  const t = tanLat * tanLat
+  const c = ep2 * cosLat * cosLat
+  const dl = lon - lon0
+  const aCoeff = dl * cosLat
+
+  // 子午线弧长
+  const m =
+    a *
+    ((1 - e2 / 4 - (3 * e4) / 64 - (5 * e6) / 256) * lat -
+      ((3 * e2) / 8 + (3 * e4) / 32 + (45 * e6) / 1024) * Math.sin(2 * lat) +
+      ((15 * e4) / 256 + (45 * e6) / 1024) * Math.sin(4 * lat) -
+      ((35 * e6) / 3072) * Math.sin(6 * lat))
+
+  const easting =
+    500000 +
+    n *
+      (aCoeff +
+        ((1 - t + c) * aCoeff ** 3) / 6 +
+        ((5 - 18 * t + t * t + 72 * c - 58 * ep2) * aCoeff ** 5) / 120)
+  const northing =
+    m +
+    n *
+      tanLat *
+      (aCoeff ** 2 / 2 +
+        ((5 - t + 9 * c + 4 * c * c) * aCoeff ** 4) / 24 +
+        ((61 - 58 * t + t * t + 600 * c - 330 * ep2) * aCoeff ** 6) / 720)
+
+  return { easting, northing }
+}
+
+/**
+ * ECEF 地心坐标 → 经纬度 + 椭球高（CGCS2000 / GRS80）。
+ * 用于把场景点击位置换算成经纬度/高程。
+ */
+export function ecefToLonLatHeight(ecef: THREE.Vector3): {
+  longitude: number
+  latitude: number
+  height: number
+} {
+  const a = 6378137
+  const f = 1 / 298.257222101
+  const e2 = f * (2 - f)
+
+  const x = ecef.x
+  const y = ecef.y
+  const z = ecef.z
+  const p = Math.sqrt(x * x + y * y)
+  const longitude = Math.atan2(y, x)
+
+  // 迭代求地心纬度 → 大地纬度（鲍林公式）
+  let lat = Math.atan2(z, p * (1 - e2))
+  let height = 0
+  for (let i = 0; i < 10; i++) {
+    const n = a / Math.sqrt(1 - e2 * Math.sin(lat) * Math.sin(lat))
+    height = p / Math.cos(lat) - n
+    lat = Math.atan2(z, p * (1 - (e2 * n) / (n + height)))
+  }
+
+  return {
+    longitude: THREE.MathUtils.radToDeg(longitude),
+    latitude: THREE.MathUtils.radToDeg(lat),
+    height,
+  }
+}
+
+/** 建模初期提供的 CGCS2000（EPSG:4490）偏移参数 */
+export interface GeoOffsetParams {
+  /** 东偏移（米），如 466748.787 */
+  offsetX: number
+  /** 北偏移（米），如 3942467.775 */
+  offsetY: number
+  /** 高程偏移（米），如 2000 */
+  offsetZ: number
+  /** 高斯-克吕格中央子午线经度（度），如 114 */
+  centralMeridianDeg: number
+}
+
+/**
+ * 由建模偏移参数构建「GLB 局部坐标 → 场景局部坐标」矩阵。
+ *
+ * 算法：
+ * 1. 局部原点 (0,0,0) 的真实位置 = 高斯-克吕格反算(offsetX, offsetY) 的经纬度 + offsetZ 高程；
+ * 2. 以该点为原点建立 ENU 切平面，GLB 的 x→东、y→高程、z→南；
+ *    （glTF 是右手系：x=东、y=上 时 z 必须朝南，否则矩阵是镜像）
+ * 3. 局部 → ECEF（ENU 基向量 + 原点 ECEF），再经 ecefToScene 进入场景坐标系。
+ *
+ * @param params - 建模偏移参数
+ * @param ecefToScene - 场景变换矩阵（ECEF → 场景局部坐标，取自地形瓦片集）
+ * @returns GLB 局部坐标 → 场景局部坐标的 4×4 矩阵
+ */
+export function createGeoOffsetMatrix(
+  params: GeoOffsetParams,
+  ecefToScene: THREE.Matrix4,
+): THREE.Matrix4 {
+  const { longitude, latitude } = gaussKrugerInverse(
+    params.offsetX,
+    params.offsetY,
+    params.centralMeridianDeg,
+  )
+  const originEcef = lonLatHeightToEcef(longitude, latitude, params.offsetZ)
+
+  // ENU 基向量（ECEF 系）
+  const lonRad = THREE.MathUtils.degToRad(longitude)
+  const latRad = THREE.MathUtils.degToRad(latitude)
+  const east = new THREE.Vector3(-Math.sin(lonRad), Math.cos(lonRad), 0)
+  const north = new THREE.Vector3(
+    -Math.sin(latRad) * Math.cos(lonRad),
+    -Math.sin(latRad) * Math.sin(lonRad),
+    Math.cos(latRad),
+  )
+  const up = new THREE.Vector3(
+    Math.cos(latRad) * Math.cos(lonRad),
+    Math.cos(latRad) * Math.sin(lonRad),
+    Math.sin(latRad),
+  )
+
+  // GLB 局部 (x, y, z) → ECEF：列 = [东, 上, 南]（右手系，避免镜像）
+  const south = north.clone().negate()
+  const localToEcef = new THREE.Matrix4().makeBasis(east, up, south)
+  localToEcef.setPosition(originEcef)
+
+  return new THREE.Matrix4().multiplyMatrices(ecefToScene, localToEcef)
+}
+
 // ========== 经纬度 → 场景局部坐标（组合转换）==========
 
 /**
