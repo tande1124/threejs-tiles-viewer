@@ -25,28 +25,17 @@ import PointLocatorForm, {
 } from '@/components/PointLocatorForm.vue'
 
 /**
- * 建模初期提供的 CGCS2000（EPSG:4490）偏移参数：GLB 局部坐标 + 偏移 = 真实平面坐标。
- * offsetX 为东偏移、offsetY 为北偏移、offsetZ 为高程偏移（单位：米）。
+ * jfs-bim.glb 的地理配准参数（已用「上水库真实位置 113.632328°E, 35.610566°N, 1184.8m」
+ * 反算）。每个 GLB 模型一份自己的配准参数，加载时自动定位。
+ * 新模型可用控制台 __tilesViewer.calibrateFromAnchor(...) 反算。
  */
-const DEFAULT_GLTF_GEO_OFFSET = {
-  offsetX: 466748.787,
-  offsetY: 3942467.775,
-  offsetZ: 1500,
-  /** 高斯-克吕格中央子午线经度（度），3° 带常用 114；若偏差较大请核对实际带号 */
+const DEFAULT_GLTF_GEO = {
   centralMeridianDeg: 114,
+  offsetX: 460017.334,
+  offsetY: 3939528.414,
+  offsetZ: -34.354,
+  verticalScale: 1,
 }
-
-/**
- * GLB 相对场景的手动校准偏移（场景单位，米）。
- * 若坐标转换后仍有偏差，在这里按实际看到的方向微调：
- * 例如模型偏东 +200 米 → 把 [0,0,0] 改成 [200,0,0]。
- * 提示：也可在页面里用快捷键实时校准（A/D/W/S/R/F 平移、Q/E 绕 Y 旋转，
- * 按住 Shift 步长 ×10），控制台会打印可直接填入这里的数值。
- */
-const DEFAULT_GLTF_OFFSET: [number, number, number] = [0, 0, 0]
-
-/** GLB 手动旋转（度，欧拉角 [rx, ry, rz]，绕模型中心），用于校正朝向偏差 */
-const DEFAULT_GLTF_ROTATION: [number, number, number] = [0, 0, 0]
 
 export default defineComponent({
   name: 'ThreeTilesViewer',
@@ -83,7 +72,6 @@ export default defineComponent({
         }),
       )
       this.controller.mount(viewerRoot)
-      this.controller.enableGltfCalibration()
 
       try {
         await this.loadDefaultScene()
@@ -110,14 +98,10 @@ export default defineComponent({
       await this.controller.loadScene(this.defaultSceneConfig.sources)
     },
 
-    /** 直接加载默认 GLTF 模型到场景，并按 CGCS2000 偏移参数定位 */
+    /** 直接加载默认 GLTF 模型到场景，并按地理配准参数自动定位 */
     async loadDefaultGltf() {
       if (!this.controller) return
-      await this.controller.loadGltf('./data/gltf/jfs-bim.glb', {
-        geoOffset: DEFAULT_GLTF_GEO_OFFSET,
-        rotation: DEFAULT_GLTF_ROTATION,
-        offset: DEFAULT_GLTF_OFFSET,
-      })
+      await this.controller.loadGltf('./data/gltf/jfs-bim.glb', { geo: DEFAULT_GLTF_GEO })
     },
 
     /** 处理表单提交的经纬度，渲染点位并自动飞行定位 */

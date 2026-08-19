@@ -155,17 +155,34 @@ export function lonLatToEcefUp(longitude: number, latitude: number): THREE.Vecto
   ).normalize()
 }
 
+// ========== 经纬度 → 场景局部坐标（组合转换）==========
+
+/**
+ * 将经纬度坐标直接转换为场景局部空间坐标
+ *
+ * 这是经纬度点位渲染的核心转换流程：
+ *   WGS84(经度, 纬度, 高度) → ECEF → 场景局部坐标
+ *
+ * @param coordinate - 经纬度坐标对象
+ * @param reference - 场景变换参考对象
+ * @returns 场景局部空间中对应的三维坐标
+ */
+export function lonLatToScenePosition(
+  coordinate: LonLatCoordinate,
+  reference: SceneTransformReference,
+): THREE.Vector3 {
+  const ecef = lonLatHeightToEcef(coordinate.longitude, coordinate.latitude, coordinate.height ?? 0)
+  return ecefToScenePosition(ecef, reference)
+}
+
 // ========== CGCS2000 高斯-克吕格投影 ==========
 
 /**
  * 高斯-克吕格投影反算：CGCS2000（GRS80 椭球）平面坐标 → 经纬度（度）。
  *
- * 用于把建模初期提供的 CGCS2000 平面偏移参数（如 offsetX/offsetY）换算成
- * 经纬度，再交给 lonLatHeightToEcef 转 ECEF。
- *
  * @param easting - 东坐标（米，含 500000 假东）
  * @param northing - 北坐标（米）
- * @param centralMeridianDeg - 中央子午线经度（度），如 3° 带 114°E
+ * @param centralMeridianDeg - 中央子午线经度（度）
  * @returns 经纬度（度）
  */
 export function gaussKrugerInverse(
@@ -226,7 +243,6 @@ export function gaussKrugerInverse(
 
 /**
  * 高斯-克吕格投影正算：CGCS2000（GRS80 椭球）经纬度 → 平面坐标（含 500000 假东）。
- * 与 gaussKrugerInverse 互逆，用于把场景点击位置换算成 CGCS2000 大坐标。
  *
  * @param longitude - 经度（度）
  * @param latitude - 纬度（度）
@@ -239,7 +255,7 @@ export function gaussKrugerForward(
   centralMeridianDeg: number,
 ): { easting: number; northing: number } {
   const a = 6378137
-  const f = 1 / 298.257222101 // CGCS2000 / GRS80
+  const f = 1 / 298.257222101
   const e2 = f * (2 - f)
   const e4 = e2 * e2
   const e6 = e2 * e2 * e2
@@ -283,68 +299,38 @@ export function gaussKrugerForward(
   return { easting, northing }
 }
 
+// ========== 模型地理配准（georeferencing）==========
+
 /**
- * ECEF 地心坐标 → 经纬度 + 椭球高（CGCS2000 / GRS80）。
- * 用于把场景点击位置换算成经纬度/高程。
+ * 模型地理配准参数：把 GLB 局部坐标映射到 CGCS2000 真实平面坐标。
+ *
+ * 每个 GLB 模型都需要一份自己的配准参数（来自测绘资料或一个已知公共点），
+ * 配准后加载即可自动定位，无需在场景里手动调整。
  */
-export function ecefToLonLatHeight(ecef: THREE.Vector3): {
-  longitude: number
-  latitude: number
-  height: number
-} {
-  const a = 6378137
-  const f = 1 / 298.257222101
-  const e2 = f * (2 - f)
-
-  const x = ecef.x
-  const y = ecef.y
-  const z = ecef.z
-  const p = Math.sqrt(x * x + y * y)
-  const longitude = Math.atan2(y, x)
-
-  // 迭代求地心纬度 → 大地纬度（鲍林公式）
-  let lat = Math.atan2(z, p * (1 - e2))
-  let height = 0
-  for (let i = 0; i < 10; i++) {
-    const n = a / Math.sqrt(1 - e2 * Math.sin(lat) * Math.sin(lat))
-    height = p / Math.cos(lat) - n
-    lat = Math.atan2(z, p * (1 - (e2 * n) / (n + height)))
-  }
-
-  return {
-    longitude: THREE.MathUtils.radToDeg(longitude),
-    latitude: THREE.MathUtils.radToDeg(lat),
-    height,
-  }
-}
-
-/** 建模初期提供的 CGCS2000（EPSG:4490）偏移参数 */
-export interface GeoOffsetParams {
-  /** 东偏移（米），如 466748.787 */
-  offsetX: number
-  /** 北偏移（米），如 3942467.775 */
-  offsetY: number
-  /** 高程偏移（米），如 2000 */
-  offsetZ: number
-  /** 高斯-克吕格中央子午线经度（度），如 114 */
+export interface GeoReferenceParams {
+  /** 高斯-克吕格中央子午线经度（度） */
   centralMeridianDeg: number
+  /** 模型原点 (0,0,0) 对应的平面东坐标（米） */
+  offsetX: number
+  /** 模型原点对应的平面北坐标（米） */
+  offsetY: number
+  /** 模型原点对应的高程（米） */
+  offsetZ: number
+  /** 模型 Y 轴（高程方向）单位比例，默认 1；个别模型高程轴为英尺时填 0.3048 */
+  verticalScale?: number
 }
 
 /**
- * 由建模偏移参数构建「GLB 局部坐标 → 场景局部坐标」矩阵。
+ * 构建「GLB 局部坐标 → 场景局部坐标」的地理配准矩阵。
  *
- * 算法：
- * 1. 局部原点 (0,0,0) 的真实位置 = 高斯-克吕格反算(offsetX, offsetY) 的经纬度 + offsetZ 高程；
- * 2. 以该点为原点建立 ENU 切平面，GLB 的 x→东、y→高程、z→南；
- *    （glTF 是右手系：x=东、y=上 时 z 必须朝南，否则矩阵是镜像）
- * 3. 局部 → ECEF（ENU 基向量 + 原点 ECEF），再经 ecefToScene 进入场景坐标系。
+ * 约定（本项目已确认）：模型 x→东、y→高程、z→南（右手系），
+ * 高程轴按 verticalScale 缩放。
  *
- * @param params - 建模偏移参数
+ * @param params - 地理配准参数
  * @param ecefToScene - 场景变换矩阵（ECEF → 场景局部坐标，取自地形瓦片集）
- * @returns GLB 局部坐标 → 场景局部坐标的 4×4 矩阵
  */
-export function createGeoOffsetMatrix(
-  params: GeoOffsetParams,
+export function createGeoReferenceMatrix(
+  params: GeoReferenceParams,
   ecefToScene: THREE.Matrix4,
 ): THREE.Matrix4 {
   const { longitude, latitude } = gaussKrugerInverse(
@@ -369,30 +355,44 @@ export function createGeoOffsetMatrix(
     Math.sin(latRad),
   )
 
-  // GLB 局部 (x, y, z) → ECEF：列 = [东, 上, 南]（右手系，避免镜像）
+  // GLB 局部 (x, y, z) → ECEF：列 = [东, 上, 南]（右手系），高程轴 × verticalScale
   const south = north.clone().negate()
+  up.multiplyScalar(params.verticalScale ?? 1)
   const localToEcef = new THREE.Matrix4().makeBasis(east, up, south)
   localToEcef.setPosition(originEcef)
 
   return new THREE.Matrix4().multiplyMatrices(ecefToScene, localToEcef)
 }
 
-// ========== 经纬度 → 场景局部坐标（组合转换）==========
-
 /**
- * 将经纬度坐标直接转换为场景局部空间坐标
+ * 用一个已知公共点自动反算地理配准参数。
  *
- * 这是经纬度点位渲染的核心转换流程：
- *   WGS84(经度, 纬度, 高度) → ECEF → 场景局部坐标
+ * 已知「模型里某个构件的局部坐标 + 它在地形上对应的经纬度/高程」即可：
+ * 模型原点 (0,0,0) 的平面坐标 = 已知点平面坐标 - 构件局部坐标，直接得到偏移。
  *
- * @param coordinate - 经纬度坐标对象
- * @param reference - 场景变换参考对象
- * @returns 场景局部空间中对应的三维坐标
+ * @param local - 已知构件在模型里的局部坐标（模型加载后、米为单位）
+ * @param real - 该构件在地形上的真实经纬度 + 高程（米）
+ * @param centralMeridianDeg - 高斯-克吕格中央子午线（度）
+ * @param verticalScale - 模型高程轴比例（默认 1）
+ * @returns 可直接用于 createGeoReferenceMatrix 的配准参数
  */
-export function lonLatToScenePosition(
-  coordinate: LonLatCoordinate,
-  reference: SceneTransformReference,
-): THREE.Vector3 {
-  const ecef = lonLatHeightToEcef(coordinate.longitude, coordinate.latitude, coordinate.height ?? 0)
-  return ecefToScenePosition(ecef, reference)
+export function calibrateGeoReferenceFromAnchor(
+  local: { x: number; y: number; z: number },
+  real: { longitude: number; latitude: number; height: number },
+  centralMeridianDeg: number,
+  verticalScale = 1,
+): GeoReferenceParams {
+  const { easting, northing } = gaussKrugerForward(
+    real.longitude,
+    real.latitude,
+    centralMeridianDeg,
+  )
+  return {
+    centralMeridianDeg,
+    offsetX: easting - local.x,
+    // 约定 z→南：N = offsetY - z → offsetY = N + z
+    offsetY: northing + local.z,
+    offsetZ: real.height - local.y * verticalScale,
+    verticalScale,
+  }
 }

@@ -9,9 +9,9 @@ import { createKtx2MimeTypePlugin } from '@/utils/ktx2MimeTypePlugin'
 import { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
 import { GltfModelLoader, type GltfLoadOptions } from '@/utils/GltfModelLoader'
 import {
-  createGeoOffsetMatrix,
-  gaussKrugerInverse,
-  type GeoOffsetParams,
+  calibrateGeoReferenceFromAnchor,
+  createGeoReferenceMatrix,
+  type GeoReferenceParams,
 } from '@/utils/geo-coordinate'
 import type { TilesetSourceConfig } from '@/utils/tileset'
 
@@ -141,12 +141,6 @@ export class TilesViewerController {
   private debugHud: HTMLElement | null = null
   private debugHudLastUpdate = 0
   private lastStatusKey = ''
-  /** GLB 手动校准快捷键是否已绑定 */
-  private calibrationKeysBound = false
-  /** GLB 手动校准的键盘监听器（用于 destroy 时解绑） */
-  private keydownHandler: ((event: KeyboardEvent) => void) | null = null
-  /** 最近一次 loadGltf 加载的模型根节点 */
-  private gltfModel: THREE.Group | null = null
   private metadataSceneBounds = new THREE.Box3()
   private readonly flyAnimation = {
     active: false,
@@ -412,64 +406,26 @@ export class TilesViewerController {
    * 在场景中直接加载并渲染一个 GLTF/GLB 模型（委托给 GltfModelLoader）。
    *
    * @param url - 模型资源地址，如 './data/gltf/jfs-bim.glb'
-   * @param options.center - 是否把模型包围盒中心移到原点（默认 true，避免大坐标精度问题；
-   *   geoOffset / alignToTileset 时会强制 center: false，改由坐标转换定位）
-   * @param options.geoOffset - 按建模初期提供的 CGCS2000（EPSG:4490）偏移参数定位 GLB：
-   *   局部坐标 + 偏移 → 高斯-克吕格反算 → 经纬度 → ECEF → 场景坐标系（推荐方式）
-   * @param options.alignToTileset - 用 3dtile 的 transform 对齐 GLB：
-   *   先把 GLB 从 Y-up 转到 Z-up（匹配瓦片内容坐标系），再应用
-   *   「root.transform（内容→ECEF）+ 地形最近化（ECEF→场景局部）」组合矩阵（默认 false）
-   * @param options.centerOnTileset - 坐标转换定位后，把 GLB 包围盒中心平移到
-   *   地形包围盒中心，保证两者先重叠，再用手动 offset 微调（默认 true）
-   * @param options.rotation - 手动旋转 [rx, ry, rz]（度，欧拉角，绕模型包围盒中心），用于校正朝向
-   * @param options.offset - 手动平移偏移 [x, y, z]（场景单位，米），用于最终校准
+   * @param options.center - 是否把模型包围盒中心移到原点（默认 true；
+   *   提供 geo 配准时自动改为 false，由地理配准定位）
+   * @param options.geo - 地理配准参数：把 GLB 局部坐标自动映射到 CGCS2000 真实坐标，
+   *   再进入场景坐标系，位置与朝向一次到位（推荐方式）
    * @param options.fitCamera - 加载完成后是否自动聚焦相机到包含模型在内的场景（默认 true）
    * @returns 加载完成的模型根节点（THREE.Group）
    */
   async loadGltf(
     url: string,
-    options: GltfLoadOptions & {
-      fitCamera?: boolean
-      alignToTileset?: boolean
-      centerOnTileset?: boolean
-      geoOffset?: GeoOffsetParams
-      rotation?: [number, number, number]
-      offset?: [number, number, number]
-    } = {},
+    options: GltfLoadOptions & { fitCamera?: boolean; geo?: GeoReferenceParams } = {},
   ): Promise<THREE.Group> {
-    const { alignToTileset = false, centerOnTileset = true, geoOffset, rotation, offset } = options
+    const { geo } = options
 
-    // 使用坐标转换定位（geoOffset / alignToTileset）时保留 GLB 原始坐标
-    const model = geoOffset || alignToTileset
+    // 提供地理配准时保留模型原始坐标，加载完成后用配准矩阵定位
+    const model = geo
       ? await this.gltfModelLoader.load(url, { center: false })
       : await this.gltfModelLoader.load(url, options)
 
-    // 记录模型，供偏移参数设置时使用
-    this.gltfModel = model
-
-    if (geoOffset) {
-      // 按建模初期提供的 CGCS2000（EPSG:4490）偏移参数定位
-      await this.applyGeoOffsetToModel(model, geoOffset)
-      if (centerOnTileset) {
-        this.centerModelOnTileset(model)
-      }
-    } else if (alignToTileset) {
-      await this.alignGltfToTileset(model, centerOnTileset)
-    }
-
-    // 手动旋转（度，绕模型包围盒中心），用于校正残留朝向偏差
-    if (rotation && (rotation[0] !== 0 || rotation[1] !== 0 || rotation[2] !== 0)) {
-      const euler = new THREE.Euler(
-        THREE.MathUtils.degToRad(rotation[0]),
-        THREE.MathUtils.degToRad(rotation[1]),
-        THREE.MathUtils.degToRad(rotation[2]),
-      )
-      this.rotateGltfAroundCenter(model, new THREE.Quaternion().setFromEuler(euler))
-    }
-
-    // 手动校准偏移（在坐标转换基础上做最终微调）
-    if (offset) {
-      model.position.add(new THREE.Vector3(offset[0], offset[1], offset[2]))
+    if (geo) {
+      await this.applyGeoReference(model, geo)
     }
 
     if (options.fitCamera !== false) {
@@ -481,40 +437,50 @@ export class TilesViewerController {
     return model
   }
 
-  /** 查找地形 tileset 的 group（供 ECEF → 局部坐标变换使用） */
-  private findTerrainGroup(): THREE.Group | null {
-    const terrainEntry = [...this.tilesetEntries.values()].find((e) => e.config.kind === 'terrain')
-    return terrainEntry?.renderer.group ?? null
+  /**
+   * 用一个已知公共点自动反算 GLB 的地理配准参数（调试工具）。
+   * 输入「模型里某构件的局部坐标（加载后米值）+ 它在地形上的经纬度/高程」，
+   * 控制台打印可直接写进配置的 GeoReferenceParams。
+   *
+   * @param local - 构件在模型里的局部坐标 {x, y, z}（米）
+   * @param longitude - 该构件在地形上的经度（度）
+   * @param latitude - 纬度（度）
+   * @param height - 高程（米）
+   * @param verticalScale - 模型高程轴比例（默认 1）
+   * @param centralMeridianDeg - 中央子午线（默认 114）
+   */
+  calibrateFromAnchor(
+    local: { x: number; y: number; z: number },
+    longitude: number,
+    latitude: number,
+    height: number,
+    verticalScale = 1,
+    centralMeridianDeg = 114,
+  ): GeoReferenceParams {
+    const params = calibrateGeoReferenceFromAnchor(
+      local,
+      { longitude, latitude, height },
+      centralMeridianDeg,
+      verticalScale,
+    )
+    console.log('[地理配准] 已用已知点反算参数，写入模型配置即可自动定位:')
+    console.log(JSON.stringify(params, null, 2))
+    return params
   }
 
-  /**
-   * 获取地形瓦片集的坐标系变换矩阵（ECEF → 场景局部坐标）。
-   * 该矩阵即 3dtile 实际生效的「偏移量」（root.transform + 最近化/重定向），
-   * 可用于把 GLB 等其它图层对齐到同一坐标系。
-   * @returns 地形未加载时返回 null
-   */
-  getTilesetTransform(): THREE.Matrix4 | null {
+  /** 获取地形瓦片集的坐标系变换矩阵（ECEF → 场景局部坐标） */
+  private getTilesetTransform(): THREE.Matrix4 | null {
     const group = this.findTerrainGroup()
     if (!group) return null
     group.updateMatrixWorld(true)
     return group.matrixWorld.clone()
   }
 
-  /**
-   * 获取地形瓦片集 root.transform（内容坐标 → ECEF），未加载时返回 null。
-   */
-  getTilesetRootTransform(): THREE.Matrix4 | null {
-    const terrainEntry = [...this.tilesetEntries.values()].find((e) => e.config.kind === 'terrain')
-    const transform = terrainEntry?.metadata?.transform
-    if (!transform || transform.length !== 16) return null
-    return new THREE.Matrix4().fromArray(transform)
-  }
-
   /** 等待地形瓦片集根节点就绪（ReorientationPlugin 已算完场景矩阵）后执行回调 */
   private whenTerrainReady(callback: () => void): Promise<void> {
     const terrainEntry = [...this.tilesetEntries.values()].find((e) => e.config.kind === 'terrain')
     if (!terrainEntry) {
-      console.warn('[loadGltf] 未找到地形瓦片集。')
+      console.warn('[loadGltf] 未找到地形瓦片集，无法进行地理配准。')
       return Promise.resolve()
     }
 
@@ -541,264 +507,27 @@ export class TilesViewerController {
     })
   }
 
-  /**
-   * 按建模初期提供的 CGCS2000（EPSG:4490）偏移参数把 GLB 定位到场景：
-   * 局部坐标 + (offsetX, offsetY, offsetZ) → 高斯-克吕格反算 → 经纬度 → ECEF → 场景坐标。
-   * 场景矩阵（ECEF → 场景局部）取自地形瓦片集加载后的实际状态。
-   */
-  private async applyGeoOffsetToModel(
+  /** 按地理配准参数把 GLB 定位到场景（等待地形就绪后应用矩阵） */
+  private async applyGeoReference(
     model: THREE.Object3D,
-    params: GeoOffsetParams,
+    params: GeoReferenceParams,
   ): Promise<void> {
     await this.whenTerrainReady(() => {
       const ecefToScene = this.getTilesetTransform()
       if (!ecefToScene) {
-        console.warn('[loadGltf] 场景变换不可用，无法按 CGCS2000 偏移定位 GLB。')
+        console.warn('[loadGltf] 场景变换不可用，无法进行地理配准。')
         return
       }
-
-      const matrix = createGeoOffsetMatrix(params, ecefToScene)
-      // 重置模型变换后应用新矩阵（避免重复叠加）
+      const matrix = createGeoReferenceMatrix(params, ecefToScene)
       model.matrix.identity()
       model.applyMatrix4(matrix)
-
-      // 替换「偏移点」小图标（挂在模型原点上，局部 0,0,0）
-      model.getObjectByName('geo-offset-marker')?.removeFromParent()
-      model.add(this.createOffsetMarker())
-
-      // 打印模型原点的真实经纬度，便于与地形位置核对
-      const geo = gaussKrugerInverse(params.offsetX, params.offsetY, params.centralMeridianDeg)
-      console.log(
-        `[loadGltf] 偏移参数定位的模型原点：经度 ${geo.longitude.toFixed(5)}°E，纬度 ${geo.latitude.toFixed(5)}°N，高程 ${params.offsetZ} m`,
-      )
-      console.log('[loadGltf] CGCS2000 偏移定位矩阵:', matrix.elements.map((n) => +n.toFixed(4)))
-      console.log('[loadGltf] GLB 原点场景位置:', model.position.toArray().map((n) => +n.toFixed(2)))
     })
   }
 
-  /**
-   * 用新的 CGCS2000（EPSG:4490）偏移参数重新定位 GLB（模型原点 → 新偏移点）。
-   * 供外部（如偏移参数设置对话框）调用。
-   */
-  async setGeoOffset(offset: GeoOffsetParams): Promise<void> {
-    if (!this.gltfModel) {
-      console.warn('[偏移设置] GLB 尚未加载，无法应用偏移参数。')
-      return
-    }
-    await this.applyGeoOffsetToModel(this.gltfModel, offset)
-  }
-
-  /** 创建「偏移点」小图标：红色圆点 + 文字标签，挂在模型原点（局部 0,0,0） */
-  private createOffsetMarker(): THREE.Group {
-    const marker = new THREE.Group()
-    marker.name = 'geo-offset-marker'
-
-    const dot = new THREE.Mesh(
-      new THREE.SphereGeometry(120, 20, 20),
-      new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
-    )
-    marker.add(dot)
-
-    // 文字标签（Canvas 纹理）
-    const canvas = document.createElement('canvas')
-    canvas.width = 512
-    canvas.height = 128
-    const ctx = canvas.getContext('2d')
-    if (ctx) {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)'
-      ctx.fillRect(0, 0, 512, 128)
-      ctx.fillStyle = '#ffffff'
-      ctx.font = 'bold 56px sans-serif'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillText('偏移点', 256, 64)
-
-      const label = new THREE.Sprite(
-        new THREE.SpriteMaterial({
-          map: new THREE.CanvasTexture(canvas),
-          transparent: true,
-          depthTest: false,
-        }),
-      )
-      label.scale.set(800, 200, 1)
-      label.position.set(0, 400, 0)
-      marker.add(label)
-    }
-
-    return marker
-  }
-
-  /**
-   * 用地形瓦片集的 transform 对齐 GLB 模型：
-   * 组合矩阵 = 地形最近化矩阵（ECEF→场景局部）· root.transform（内容→ECEF）· 轴转换（Y-up→Z-up）。
-   * GLB 是 glTF Y-up，而瓦片内容坐标系是 Z-up，必须先把 GLB 的 up 转到 Z，
-   * 否则模型会被放倒、朝向全错。centerOnTileset 时再把 GLB 包围盒中心平移到地形中心，
-   * 保证两者重叠，最后用手动 rotation / offset 微调。
-   * 地形根尚未加载时，等待 load-root-tileset 事件（ReorientationPlugin 计算完矩阵）后再应用。
-   */
-  private async alignGltfToTileset(model: THREE.Object3D, centerOnTileset: boolean): Promise<void> {
+  /** 查找地形 tileset 的 group（供 ECEF → 局部坐标变换使用） */
+  private findTerrainGroup(): THREE.Group | null {
     const terrainEntry = [...this.tilesetEntries.values()].find((e) => e.config.kind === 'terrain')
-    if (!terrainEntry) {
-      console.warn('[loadGltf] 未找到地形瓦片集，无法用 tileset transform 对齐 GLB。')
-      return
-    }
-
-    const apply = () => {
-      const recenterMatrix = this.getTilesetTransform()
-      const rootTransform = this.getTilesetRootTransform()
-      if (!recenterMatrix || !rootTransform) {
-        console.warn('[loadGltf] 地形 transform 不可用，GLB 未对齐。')
-        return
-      }
-
-      // glTF 是 Y-up，瓦片内容坐标系是 Z-up：先绕 X 转 +90° 把 up 从 +Y 转到 +Z
-      const upFix = new THREE.Matrix4().makeRotationX(Math.PI / 2)
-      const matrix = new THREE.Matrix4().multiplyMatrices(recenterMatrix, rootTransform).multiply(upFix)
-      model.applyMatrix4(matrix)
-
-      if (centerOnTileset) {
-        this.centerModelOnTileset(model)
-      }
-
-      console.log('[loadGltf] tileset 对齐矩阵（内容→场景局部）:', matrix.elements.map((n) => +n.toFixed(4)))
-      console.log('[loadGltf] GLB 对齐后场景位置:', model.position.toArray().map((n) => +n.toFixed(2)))
-    }
-
-    const tilesRenderer = terrainEntry.renderer as unknown as { root: unknown }
-    if (tilesRenderer.root) {
-      apply()
-    } else {
-      // 地形根尚未加载，等 ReorientationPlugin 完成矩阵计算后再应用
-      await new Promise<void>((resolve) => {
-        const onRootLoaded = () => {
-          terrainEntry.renderer.removeEventListener('load-root-tileset', onRootLoaded)
-          terrainEntry.renderer.removeEventListener('load-error', onLoadError)
-          apply()
-          resolve()
-        }
-        const onLoadError = () => {
-          terrainEntry.renderer.removeEventListener('load-root-tileset', onRootLoaded)
-          terrainEntry.renderer.removeEventListener('load-error', onLoadError)
-          resolve()
-        }
-        terrainEntry.renderer.addEventListener('load-root-tileset', onRootLoaded)
-        terrainEntry.renderer.addEventListener('load-error', onLoadError)
-      })
-    }
-  }
-
-  /** 把模型包围盒中心平移到地形包围盒中心（场景坐标），保证两者重叠 */
-  private centerModelOnTileset(model: THREE.Object3D): void {
-    const modelBox = new THREE.Box3().setFromObject(model)
-    const terrainBox = new THREE.Box3().setFromObject(this.tilesetRoot)
-    if (modelBox.isEmpty() || terrainBox.isEmpty()) return
-
-    const modelCenter = modelBox.getCenter(new THREE.Vector3())
-    const terrainCenter = terrainBox.getCenter(new THREE.Vector3())
-    model.position.add(terrainCenter.sub(modelCenter))
-  }
-
-  /** 绕模型包围盒中心旋转（四元数），用于校正朝向 */
-  private rotateGltfAroundCenter(model: THREE.Object3D, rotation: THREE.Quaternion): void {
-    const box = new THREE.Box3().setFromObject(model)
-    if (box.isEmpty()) return
-
-    const pivot = box.getCenter(new THREE.Vector3())
-    model.position.sub(pivot)
-    model.quaternion.premultiply(rotation)
-    model.position.applyQuaternion(rotation)
-    model.position.add(pivot)
-  }
-
-  /**
-   * 启用 GLB 手动校准快捷键（用于对齐调试，随时可调）：
-   * - A/D 或 ←/→：X 方向平移
-   * - W/S 或 ↑/↓：Z 方向平移
-   * - R/F：Y 方向（上下）平移
-   * - Q/E：绕模型中心绕 Y 轴旋转 ±1°（校正朝向）
-   * - 按住 Shift 平移步长 ×10
-   * 每次操作在控制台打印可直接写入 DEFAULT_GLTF_OFFSET / DEFAULT_GLTF_ROTATION 的数值。
-   */
-  enableGltfCalibration(): void {
-    if (this.calibrationKeysBound) return
-    this.calibrationKeysBound = true
-
-    const record = { offset: [0, 0, 0] as [number, number, number], yaw: 0 }
-
-    this.keydownHandler = (event: KeyboardEvent) => {
-      // 在输入框/文本域中不响应，避免干扰经纬度表单输入
-      const target = event.target as HTMLElement | null
-      if (
-        target &&
-        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
-      ) {
-        return
-      }
-
-      const model = this.gltfModelLoader.root.children[0] as THREE.Object3D | undefined
-      if (!model) return
-
-      const s = event.shiftKey ? 100 : 10
-      let changed = true
-
-      switch (event.key) {
-        case 'a': case 'A': case 'ArrowLeft':
-          record.offset[0] -= s
-          model.position.x -= s
-          break
-        case 'd': case 'D': case 'ArrowRight':
-          record.offset[0] += s
-          model.position.x += s
-          break
-        case 'w': case 'W': case 'ArrowUp':
-          record.offset[2] -= s
-          model.position.z -= s
-          break
-        case 's': case 'S': case 'ArrowDown':
-          record.offset[2] += s
-          model.position.z += s
-          break
-        case 'r': case 'R':
-          record.offset[1] += s
-          model.position.y += s
-          break
-        case 'f': case 'F':
-          record.offset[1] -= s
-          model.position.y -= s
-          break
-        case 'q': case 'Q':
-          record.yaw -= 1
-          this.rotateGltfAroundCenter(
-            model,
-            new THREE.Quaternion().setFromAxisAngle(
-              new THREE.Vector3(0, 1, 0),
-              THREE.MathUtils.degToRad(-1),
-            ),
-          )
-          break
-        case 'e': case 'E':
-          record.yaw += 1
-          this.rotateGltfAroundCenter(
-            model,
-            new THREE.Quaternion().setFromAxisAngle(
-              new THREE.Vector3(0, 1, 0),
-              THREE.MathUtils.degToRad(1),
-            ),
-          )
-          break
-        default:
-          changed = false
-      }
-
-      if (!changed) return
-      event.preventDefault()
-      console.log(
-        `[GLB 校准] DEFAULT_GLTF_OFFSET = [${record.offset.map((n) => n.toFixed(0)).join(', ')}]` +
-          `, DEFAULT_GLTF_ROTATION = [0, ${record.yaw}, 0]`,
-      )
-    }
-
-    window.addEventListener('keydown', this.keydownHandler)
+    return terrainEntry?.renderer.group ?? null
   }
 
   /** 设置坐标轴辅助线是否显示 */
@@ -1007,11 +736,6 @@ export class TilesViewerController {
     window.clearTimeout(this.fitTimerId)
     window.clearTimeout(this.groundingTimerId)
     cancelAnimationFrame(this.animationFrameId)
-    if (this.keydownHandler) {
-      window.removeEventListener('keydown', this.keydownHandler)
-      this.keydownHandler = null
-    }
-    this.calibrationKeysBound = false
     this.debugHud?.remove()
     this.debugHud = null
     this.resizeObserver.disconnect()
