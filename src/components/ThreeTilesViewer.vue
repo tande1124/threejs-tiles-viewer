@@ -25,15 +25,17 @@ import PointLocatorForm, {
 } from '@/components/PointLocatorForm.vue'
 
 /**
- * jfs-bim.glb 的地理配准参数（已用「上水库真实位置 113.632328°E, 35.610566°N, 1184.8m」
- * 反算）。每个 GLB 模型一份自己的配准参数，加载时自动定位。
+ * jfs-bim.glb 的地理配准参数：已用「上水库库盆的实测位置
+ * (113.632328°E, 35.614638°N, 1170m)」反算（对应模型中上水库库盆包围盒中心，
+ * 非几何中心，坐标由现场实测提供）。
+ * 每个 GLB 模型一份自己的配准参数，加载时自动定位。
  * 新模型可用控制台 __tilesViewer.calibrateFromAnchor(...) 反算。
  */
 const DEFAULT_GLTF_GEO = {
   centralMeridianDeg: 114,
-  offsetX: 460017.334,
-  offsetY: 3939528.414,
-  offsetZ: -34.354,
+  offsetX: 460019.023,
+  offsetY: 3939980.213,
+  offsetZ: 0,  // offsetZ 每 +1 → 模型整体抬高 1 米。当前是 -49.154：
   verticalScale: 1,
 }
 
