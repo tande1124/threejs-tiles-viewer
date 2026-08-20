@@ -4,6 +4,10 @@ import { DRACOLoader, DRACO_GLTF_CONFIG } from 'three/addons/loaders/DRACOLoader
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js'
 import { TilesRenderer } from '3d-tiles-renderer'
 import { GLTFExtensionsPlugin, ReorientationPlugin } from '3d-tiles-renderer/three/plugins'
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js'
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { disposeObject3D } from '@/utils/three-dispose'
 import { createKtx2MimeTypePlugin } from '@/utils/ktx2MimeTypePlugin'
 import { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
@@ -142,6 +146,10 @@ export class TilesViewerController {
   private readonly axesHelper = new THREE.AxesHelper(1)
   private axesVisible = true
 
+  // ---- 后处理（选中部件白色轮廓） ----
+  private composer: EffectComposer | null = null
+  private outlinePass: OutlinePass | null = null
+
   // ---- 内部状态 ----
   private container: HTMLElement | null = null
   private readonly tilesetEntries = new Map<string, ManagedTilesetEntry>()
@@ -209,7 +217,10 @@ export class TilesViewerController {
       dracoLoader: this.dracoLoader,
       ktx2Loader: this.ktx2Loader,
       enhanceTextures: (model) => this.enhanceModelTextures(model),
-      onPick: (info, position) => this.callbacks.onGltfPick?.(info, position),
+      onPick: (info, position) => {
+        this.callbacks.onGltfPick?.(info, position)
+        this.updateOutlineSelection()
+      },
     })
 
     // 启用 GLB 部件点击拾取（点击部件回调 onGltfPick，点击空白回调 null）
@@ -346,6 +357,7 @@ export class TilesViewerController {
     this.debugHud = this.createDebugHud(container)
     this.resizeObserver.observe(container)
     this.handleResize()
+    this.setupPostProcessing()
     this.startLoop()
 
     ;(window as unknown as { __tilesViewer?: TilesViewerController }).__tilesViewer = this
@@ -355,6 +367,38 @@ export class TilesViewerController {
       progress: 0,
       message: 'Three.js 场景已就绪，正在准备默认组合场景...',
     })
+  }
+
+  /** 创建后处理合成器：RenderPass → OutlinePass（白色轮廓）→ OutputPass（色彩空间） */
+  private setupPostProcessing(): void {
+    const composer = new EffectComposer(this.renderer)
+    composer.addPass(new RenderPass(this.scene, this.camera))
+
+    const outlinePass = new OutlinePass(
+      new THREE.Vector2(1, 1),
+      this.scene,
+      this.camera,
+    )
+    outlinePass.visibleEdgeColor.set('#ffffff')
+    outlinePass.hiddenEdgeColor.set('#9aa7bd')
+    outlinePass.edgeGlow = 0
+    outlinePass.edgeThickness = 2
+    outlinePass.edgeStrength = 4
+    outlinePass.pulsePeriod = 0
+    composer.addPass(outlinePass)
+
+    // three r152+ 渲染到 render target 时不做色彩空间转换，需要 OutputPass 输出到屏幕
+    composer.addPass(new OutputPass())
+
+    this.composer = composer
+    this.outlinePass = outlinePass
+  }
+
+  /** 同步 OutlinePass 的选中对象（白色轮廓跟随当前选中的 GLB 部件） */
+  private updateOutlineSelection(): void {
+    if (!this.outlinePass) return
+    const object = this.gltfModelLoader.getHighlightedObject()
+    this.outlinePass.selectedObjects = object ? [object] : []
   }
 
   /** 加载组合场景：清除旧数据 → 拉元数据 → 先地形后模型 → 初始聚焦 */
@@ -495,11 +539,13 @@ export class TilesViewerController {
   /** 高亮指定 GLB 部件（或其子树），传 null 清除当前高亮（调试工具） */
   highlightGltf(object: THREE.Object3D | null): void {
     this.gltfModelLoader.highlight(object)
+    this.updateOutlineSelection()
   }
 
   /** 清除 GLB 部件高亮 */
   clearGltfHighlight(): void {
     this.gltfModelLoader.clearHighlight()
+    this.updateOutlineSelection()
   }
 
   /** 获取地形瓦片集的坐标系变换矩阵（ECEF → 场景局部坐标） */
@@ -795,6 +841,10 @@ export class TilesViewerController {
     this.gltfModelLoader.disablePicking()
     this.clearSceneSources()
     this.pointMarkerRenderer.dispose()
+    this.outlinePass?.dispose()
+    this.composer?.dispose()
+    this.outlinePass = null
+    this.composer = null
     this.controls.dispose()
     this.timer.dispose()
     this.ktx2Loader.dispose()
@@ -840,7 +890,11 @@ export class TilesViewerController {
       // 天空盒跟随相机，保证任意缩放距离下背景始终环绕视角
       this.skyBox.position.copy(this.camera.position)
 
-      this.renderer.render(this.scene, this.camera)
+      if (this.composer) {
+        this.composer.render()
+      } else {
+        this.renderer.render(this.scene, this.camera)
+      }
     }
 
     renderFrame()
@@ -1063,6 +1117,10 @@ export class TilesViewerController {
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(width, height, false)
     this.renderer.setPixelRatio(this.getPreferredPixelRatio())
+
+    // 同步后处理合成器与轮廓 pass 的尺寸（内部会按 pixelRatio 换算）
+    this.composer?.setSize(width, height)
+    this.composer?.setPixelRatio(this.getPreferredPixelRatio())
 
     for (const entry of this.tilesetEntries.values()) {
       this.syncTileResolution(entry)

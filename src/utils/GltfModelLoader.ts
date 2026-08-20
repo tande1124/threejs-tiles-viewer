@@ -12,7 +12,7 @@ export interface GltfLoadOptions {
 
 /** GLB 部件点击拾取信息 */
 export interface GltfPickInfo {
-  /** 命中的网格对象 */
+  /** 选中的部件对象（命中网格向上最近的命名祖先，轮廓/半透明作用于整个部件） */
   object: THREE.Object3D
   /** 部件名称（对象本身无名字时取最近的有名字的祖先） */
   name: string
@@ -38,8 +38,6 @@ export interface GltfModelLoaderDeps {
   ktx2Loader: KTX2Loader
   /** 可选：模型加载完成后对模型做纹理质量增强（由使用方提供实现） */
   enhanceTextures?: (model: THREE.Object3D) => void
-  /** 可选：点击部件高亮颜色（默认橙色 #ff8800） */
-  highlightColor?: THREE.ColorRepresentation
   /**
    * 可选：点击 GLB 部件时回调部件信息与点击位置（视口坐标）。
    * info 为 null 表示点击未命中模型（可关闭弹窗），此时 position 也为 null。
@@ -58,6 +56,7 @@ export interface GltfModelLoaderDeps {
  * 所有模型统一挂到 root 容器组下（root 已在构造函数中加入 scene）。
  * 同时提供点击拾取能力：enablePicking 后点击 GLB 部件会通过 deps.onPick
  * 回调该部件的位置/名称等详情，未命中模型时回调 null。
+ * 选中部件通过 highlight() 变为半透明显示（配合控制器里的白色轮廓后处理）。
  */
 export class GltfModelLoader {
   /** 所有已加载模型的父级容器组（已加入 scene） */
@@ -72,20 +71,21 @@ export class GltfModelLoader {
   private pickDomElement: HTMLElement | null = null
   private readonly pickPointerStart = new THREE.Vector2()
 
-  // ---- 部件高亮状态 ----
-  private readonly highlightColor: THREE.Color
+  // ---- 部件选中（半透明）状态 ----
+  /** 当前选中的部件对象（null 表示无选中） */
   private highlightedObject: THREE.Object3D | null = null
-  /** 高亮前每个网格的原始材质（恢复时用） */
+  /** 选中部件的半透明不透明度 */
+  private static readonly SELECTED_OPACITY = 0.9
+  /** 选中前每个网格的原始材质（恢复时用） */
   private readonly highlightedOriginalMaterials = new Map<
     THREE.Mesh,
     THREE.Material | THREE.Material[]
   >()
-  /** 高亮时克隆出的临时材质（清除时释放） */
+  /** 选中时克隆出的临时材质（清除时释放） */
   private readonly highlightedClonedMaterials = new Set<THREE.Material>()
 
   constructor(deps: GltfModelLoaderDeps) {
     this.deps = deps
-    this.highlightColor = new THREE.Color(deps.highlightColor ?? '#ff8800')
 
     this.root = new THREE.Group()
     this.root.name = 'gltf-root'
@@ -159,10 +159,13 @@ export class GltfModelLoader {
     const model = this.findModelRoot(object)
     if (!model) return null
 
+    // 选中整个「部件」：取命名的最近祖先，保证轮廓/半透明作用于整个部件而非单个网格
+    const part = this.resolvePartObject(object, model)
+
     return {
-      object,
-      name: this.resolveObjectName(object),
-      path: this.buildObjectPath(object, model),
+      object: part,
+      name: this.resolveObjectName(part),
+      path: this.buildObjectPath(part, model),
       worldPosition: hit.point.clone(),
       localPosition: model.worldToLocal(hit.point.clone()),
       distance: hit.distance,
@@ -171,8 +174,9 @@ export class GltfModelLoader {
   }
 
   /**
-   * 高亮指定 GLB 部件（或其子树）：克隆部件材质并叠加高亮色，
-   * 不影响共享同一材质的其他部件。传 null 清除当前高亮。
+   * 选中指定 GLB 部件（或其子树）：克隆部件材质并设为「白色半透明」，
+   * 不影响共享同一材质的其他部件。传 null 清除当前选中。
+   * 白色轮廓由控制器的 OutlinePass 后处理根据 getHighlightedObject() 绘制。
    */
   highlight(object: THREE.Object3D | null): void {
     if (this.highlightedObject === object) return
@@ -198,7 +202,7 @@ export class GltfModelLoader {
     })
   }
 
-  /** 清除当前高亮，恢复部件原始材质 */
+  /** 清除当前选中，恢复部件原始材质 */
   clearHighlight(): void {
     if (!this.highlightedObject) return
 
@@ -213,6 +217,11 @@ export class GltfModelLoader {
     this.highlightedClonedMaterials.clear()
 
     this.highlightedObject = null
+  }
+
+  /** 当前选中的部件对象（null 表示无选中；供 OutlinePass 绘制白色轮廓） */
+  getHighlightedObject(): THREE.Object3D | null {
+    return this.highlightedObject
   }
 
   /** 清除并释放所有已加载的 GLTF 模型 */
@@ -247,23 +256,26 @@ export class GltfModelLoader {
     this.deps.onPick?.(info, info ? { x: event.clientX, y: event.clientY } : null)
   }
 
-  /** 给克隆材质叠加高亮色（优先用 emissive，无 emissive 的材质直接混色） */
+  /** 给克隆材质设置为「白色半透明」：颜色置白、去掉漫反射贴图，避免原颜色/纹理透出 */
   private applyHighlightToMaterial(material: THREE.Material): void {
-    const highlightable = material as THREE.MeshStandardMaterial & {
+    const colored = material as THREE.MeshStandardMaterial & {
+      color?: THREE.Color
+      map?: THREE.Texture | null
       emissive?: THREE.Color
-      emissiveIntensity?: number
     }
 
-    if (highlightable.emissive) {
-      highlightable.emissive.copy(this.highlightColor)
-      highlightable.emissiveIntensity = 0.6
-    } else {
-      const colorMaterial = material as THREE.MeshBasicMaterial
-      if (colorMaterial.color) {
-        colorMaterial.color.lerp(this.highlightColor, 0.35)
-      }
+    if (colored.color) {
+      colored.color.set('#ffffff')
+    }
+    // 去掉漫反射贴图，保证整体呈现纯白（原纹理不再透出）
+    colored.map = null
+    if (colored.emissive) {
+      colored.emissive.set('#000000')
     }
 
+    material.transparent = true
+    material.opacity = GltfModelLoader.SELECTED_OPACITY
+    material.depthWrite = false
     material.needsUpdate = true
   }
 
@@ -302,6 +314,16 @@ export class GltfModelLoader {
       node = node.parent
     }
     return '(未命名部件)'
+  }
+
+  /** 取「部件」对象：命中网格向上取最近的有名字的祖先（整个部件一起选中） */
+  private resolvePartObject(object: THREE.Object3D, model: THREE.Group): THREE.Object3D {
+    let node: THREE.Object3D | null = object
+    while (node && node !== model) {
+      if (node.name) return node
+      node = node.parent
+    }
+    return object
   }
 
   /** 生成「模型根 → 命中对象」的节点路径 */
