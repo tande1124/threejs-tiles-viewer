@@ -7,13 +7,17 @@ import { GLTFExtensionsPlugin, ReorientationPlugin } from '3d-tiles-renderer/thr
 import { disposeObject3D } from '@/utils/three-dispose'
 import { createKtx2MimeTypePlugin } from '@/utils/ktx2MimeTypePlugin'
 import { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
-import { GltfModelLoader, type GltfLoadOptions } from '@/utils/GltfModelLoader'
+import {
+  GltfModelLoader,
+  type GltfLoadOptions,
+  type GltfPickInfo,
+} from '@/utils/GltfModelLoader'
 import {
   calibrateGeoReferenceFromAnchor,
   createGeoReferenceMatrix,
   type GeoReferenceParams,
 } from '@/utils/geo-coordinate'
-import type { TilesetSourceConfig } from '@/utils/tileset'
+import type { SceneSourceKind, TilesetSourceConfig } from '@/utils/tileset'
 
 // ========== 配置常量 ==========
 
@@ -67,6 +71,14 @@ export interface ViewerStatus {
 
 export interface ViewerCallbacks {
   onStatusChange?: (status: ViewerStatus) => void
+  /**
+   * 点击 GLB 模型部件时的回调（info 为 null 表示点击未命中模型，可关闭弹窗；
+   * position 为点击位置视口坐标，用于弹窗锚定）
+   */
+  onGltfPick?: (
+    info: GltfPickInfo | null,
+    position: { x: number; y: number } | null,
+  ) => void
 }
 
 interface TilesetEntryListeners {
@@ -197,7 +209,11 @@ export class TilesViewerController {
       dracoLoader: this.dracoLoader,
       ktx2Loader: this.ktx2Loader,
       enhanceTextures: (model) => this.enhanceModelTextures(model),
+      onPick: (info, position) => this.callbacks.onGltfPick?.(info, position),
     })
+
+    // 启用 GLB 部件点击拾取（点击部件回调 onGltfPick，点击空白回调 null）
+    this.gltfModelLoader.enablePicking(this.camera, this.renderer.domElement)
 
     this.pointMarkerRenderer = new PointMarkerRenderer({
       tilesetRoot: this.tilesetRoot,
@@ -468,6 +484,24 @@ export class TilesViewerController {
     return params
   }
 
+  /**
+   * 用 NDC 坐标（-1 ~ 1，原点在画布中心）手动拾取 GLB 部件（调试工具）。
+   * 返回部件详情（名称/路径/世界坐标/局部坐标），未命中返回 null。
+   */
+  pickGltfAt(ndcX: number, ndcY: number): GltfPickInfo | null {
+    return this.gltfModelLoader.pick(this.camera, new THREE.Vector2(ndcX, ndcY))
+  }
+
+  /** 高亮指定 GLB 部件（或其子树），传 null 清除当前高亮（调试工具） */
+  highlightGltf(object: THREE.Object3D | null): void {
+    this.gltfModelLoader.highlight(object)
+  }
+
+  /** 清除 GLB 部件高亮 */
+  clearGltfHighlight(): void {
+    this.gltfModelLoader.clearHighlight()
+  }
+
   /** 获取地形瓦片集的坐标系变换矩阵（ECEF → 场景局部坐标） */
   private getTilesetTransform(): THREE.Matrix4 | null {
     const group = this.findTerrainGroup()
@@ -539,6 +573,25 @@ export class TilesViewerController {
   /** 当前坐标轴辅助线是否显示 */
   getAxesVisible(): boolean {
     return this.axesVisible
+  }
+
+  // ========== 图层显隐 ==========
+
+  /** 获取所有瓦片图层及其显隐状态，供 UI 渲染 */
+  getLayerList(): Array<{ id: string; name: string; kind: SceneSourceKind; visible: boolean }> {
+    return [...this.tilesetEntries.values()].map((entry) => ({
+      id: entry.config.id,
+      name: entry.config.name,
+      kind: entry.config.kind,
+      visible: entry.renderer.group.visible,
+    }))
+  }
+
+  /** 设置某个瓦片图层的显隐（true 显示 / false 隐藏） */
+  setLayerVisible(sourceId: string, visible: boolean): void {
+    const entry = this.tilesetEntries.get(sourceId)
+    if (!entry) return
+    entry.renderer.group.visible = visible
   }
 
   // ========== 相机飞行 ==========
@@ -739,6 +792,7 @@ export class TilesViewerController {
     this.debugHud?.remove()
     this.debugHud = null
     this.resizeObserver.disconnect()
+    this.gltfModelLoader.disablePicking()
     this.clearSceneSources()
     this.pointMarkerRenderer.dispose()
     this.controls.dispose()
@@ -771,6 +825,8 @@ export class TilesViewerController {
       this.camera.updateMatrixWorld()
 
       for (const entry of this.tilesetEntries.values()) {
+        // 图层隐藏时不调度瓦片加载，恢复显示后继续
+        if (!entry.renderer.group.visible) continue
         this.syncTileResolution(entry)
         entry.renderer.update()
       }
@@ -822,8 +878,6 @@ export class TilesViewerController {
       metadata,
       listeners: {} as TilesetEntryListeners,
     }
-
-    debugger
 
     entry.listeners = {
       loadRootTileset: () => {
