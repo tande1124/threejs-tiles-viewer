@@ -4,8 +4,6 @@ import { DRACOLoader, DRACO_GLTF_CONFIG } from 'three/addons/loaders/DRACOLoader
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js'
 import { TilesRenderer } from '3d-tiles-renderer'
 import { ReorientationPlugin } from '3d-tiles-renderer/three/plugins'
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
-import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js'
 import { disposeObject3D } from '@/utils/three-dispose'
 import { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
 import {
@@ -13,11 +11,6 @@ import {
   type GltfLoadOptions,
   type GltfPickInfo,
 } from '@/utils/GltfModelLoader'
-import {
-  calibrateGeoReferenceFromAnchor,
-  createGeoReferenceMatrix,
-  type GeoReferenceParams,
-} from '@/utils/geo-coordinate'
 import type { SceneSourceKind, TilesetSourceConfig } from '@/utils/tileset'
 
 // ========== 配置常量 ==========
@@ -84,10 +77,6 @@ export class TilesViewerController {
   private readonly sceneOverlay = new THREE.Scene()
   private readonly camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10)
 
-  // ---- 后处理（选中部件白色轮廓） ----
-  private composer: EffectComposer | null = null
-  private outlinePass: OutlinePass | null = null
-
   // ---- 3D Tiles 状态 ----
   private container: HTMLElement | null = null
   private tilesRenderer: TilesRenderer | null = null
@@ -148,12 +137,18 @@ export class TilesViewerController {
     // GLTF/GLB 模型加载器：维护独立的 gltf-root 容器，复用 DRACO/KTX2 解压
     this.gltfModelLoader = new GltfModelLoader({
       scene: this.scene,
+      renderer: this.renderer,
       dracoLoader: this.dracoLoader,
       ktx2Loader: this.ktx2Loader,
-      enhanceTextures: (model) => this.enhanceModelTextures(model),
+      getEcefToSceneTransform: () => {
+        const group = this.tilesRenderer?.group
+        if (!group) return null
+        group.updateMatrixWorld(true)
+        return group.matrixWorld.clone()
+      },
+      whenTerrainReady: () => this.whenTerrainReady(),
       onPick: (info, position) => {
         callbacks.onGltfPick?.(info, position)
-        this.updateOutlineSelection()
       },
     })
 
@@ -410,25 +405,13 @@ export class TilesViewerController {
    */
   async loadGltf(
     url: string,
-    options: GltfLoadOptions & { fitCamera?: boolean; geo?: GeoReferenceParams } = {},
+    options: GltfLoadOptions & { fitCamera?: boolean } = {},
   ): Promise<THREE.Group> {
-    const { geo } = options
-
-    // 提供地理配准时保留模型原始坐标，加载完成后用配准矩阵定位
-    const model = geo
-      ? await this.gltfModelLoader.load(url, { center: false })
-      : await this.gltfModelLoader.load(url, options)
-
-    if (geo) {
-      await this.applyGeoReference(model, geo)
-    }
-
-    // 遍历设置所有子对象为 Layer 1（内部层），仅内相机可见
-    model.traverse((obj: THREE.Object3D) => {
-      if ((obj as THREE.Mesh).isMesh) {
-        obj.layers.set(1)
-      }
-    })
+    // 双相机模式：GLB 网格分配到 Layer 1（内部层），仅内相机可见
+    const loadOptions: GltfLoadOptions = { layer: 1, ...options }
+    const model = options.geo
+      ? await this.gltfModelLoader.load(url, { ...loadOptions, center: false })
+      : await this.gltfModelLoader.load(url, loadOptions)
 
     if (options.fitCamera !== false) {
       this.hasSettledView = false
@@ -438,45 +421,14 @@ export class TilesViewerController {
     return model
   }
 
-  /**
-   * 用一个已知公共点自动反算 GLB 的地理配准参数（调试工具）。
-   * 输入「模型里某构件的局部坐标（加载后米值）+ 它在地形上的经纬度/高程」，
-   * 控制台打印可直接写进配置的 GeoReferenceParams。
-   */
-  calibrateFromAnchor(
-    local: { x: number; y: number; z: number },
-    longitude: number,
-    latitude: number,
-    height: number,
-    verticalScale = 1,
-    centralMeridianDeg = 114,
-  ): GeoReferenceParams {
-    const params = calibrateGeoReferenceFromAnchor(
-      local,
-      { longitude, latitude, height },
-      centralMeridianDeg,
-      verticalScale,
-    )
-    console.log('[地理配准] 已用已知点反算参数，写入模型配置即可自动定位:')
-    console.log(JSON.stringify(params, null, 2))
-    return params
-  }
-
   /** 用 NDC 坐标（-1 ~ 1，原点在画布中心）手动拾取 GLB 部件（调试工具） */
   pickGltfAt(ndcX: number, ndcY: number): GltfPickInfo | null {
     return this.gltfModelLoader.pick(this.camera, new THREE.Vector2(ndcX, ndcY))
   }
 
-  /** 高亮指定 GLB 部件（或其子树），传 null 清除当前高亮（调试工具） */
-  highlightGltf(object: THREE.Object3D | null): void {
-    this.gltfModelLoader.highlight(object)
-    this.updateOutlineSelection()
-  }
-
   /** 清除 GLB 部件高亮 */
   clearGltfHighlight(): void {
     this.gltfModelLoader.clearHighlight()
-    this.updateOutlineSelection()
   }
 
   /** 获取瓦片图层及其显隐状态，供 UI 渲染 */
@@ -554,10 +506,6 @@ export class TilesViewerController {
     this.gltfModelLoader.disablePicking()
     this.clearTileset()
     this.pointMarkerRenderer.dispose()
-    this.outlinePass?.dispose()
-    this.composer?.dispose()
-    this.outlinePass = null
-    this.composer = null
     this.controls.dispose()
     this.ktx2Loader.dispose()
     this.dracoLoader.dispose()
@@ -599,14 +547,13 @@ export class TilesViewerController {
       // 天空盒跟随相机，保证任意缩放距离下背景始终环绕视角
       this.skyBox.position.copy(this.camera.position)
 
-      // 1. 渲染内部结构到 RenderTarget 纹理（透明背景，只画 Layer 1 的 GLB）
-      //    scene.background 和 fog 必须临时禁用，否则 Three.js 会在 render() 内部
-      //    用 scene.background 填充 render target，导致纹理背景不透明、覆盖外壳
+      // 临时禁用背景和雾，避免 Three.js 填充 render target
       const savedBackground = this.scene.background
       const savedFog = this.scene.fog
       this.scene.background = null
       this.scene.fog = null
 
+      // 1. 渲染 GLB 到 rtInner（透明背景，轮廓网格已在 Layer 1 自动绘制）
       this.renderer.setRenderTarget(this.rtInner)
       this.renderer.setClearColor(0x000000, 0) // alpha=0 → 纹理背景透明
       this.renderer.clear(true, true, false)
@@ -621,7 +568,7 @@ export class TilesViewerController {
       this.renderer.clear(true, true, false)
       this.renderer.render(this.scene, this.camera)
 
-      // 3. 叠加内部纹理：只清深度、保留外壳颜色，把内部画面合成到最上层
+      // 3. 叠加 GLB（含轮廓）：只清深度、保留外壳颜色
       this.renderer.clearDepth()
       this.renderer.render(this.sceneOverlay, this.camOrtho)
     }
@@ -648,21 +595,13 @@ export class TilesViewerController {
     this.tilesetReady = false
   }
 
-  // ========== GLB 地理配准 ==========
-
-  /** 获取地形瓦片集的坐标系变换矩阵（ECEF → 场景局部坐标） */
-  private getTilesetTransform(): THREE.Matrix4 | null {
-    const group = this.tilesRenderer?.group
-    if (!group) return null
-    group.updateMatrixWorld(true)
-    return group.matrixWorld.clone()
-  }
+  // ========== 地形状态 ==========
 
   /**
-   * 等待地形瓦片集根节点就绪（ReorientationPlugin 已算完场景矩阵）后执行回调。
+   * 等待地形瓦片集根节点就绪（ReorientationPlugin 已算完场景矩阵）。
    * 无事件监听：每 100ms 轮询检测 root 是否就绪。
    */
-  private whenTerrainReady(callback: () => void): Promise<void> {
+  private whenTerrainReady(): Promise<void> {
     const tilesRenderer = this.tilesRenderer
     if (!tilesRenderer) {
       console.warn('[loadGltf] 未加载地形瓦片集，无法进行地理配准。')
@@ -671,36 +610,15 @@ export class TilesViewerController {
 
     const isReady = () =>
       this.tilesetReady || Boolean((tilesRenderer as unknown as { root?: unknown }).root)
-    if (isReady()) {
-      callback()
-      return Promise.resolve()
-    }
+    if (isReady()) return Promise.resolve()
 
     return new Promise<void>((resolve) => {
       const timerId = window.setInterval(() => {
         if (isReady()) {
           window.clearInterval(timerId)
-          callback()
           resolve()
         }
       }, 100)
-    })
-  }
-
-  /** 按地理配准参数把 GLB 定位到场景（等待地形就绪后应用矩阵） */
-  private async applyGeoReference(
-    model: THREE.Object3D,
-    params: GeoReferenceParams,
-  ): Promise<void> {
-    await this.whenTerrainReady(() => {
-      const ecefToScene = this.getTilesetTransform()
-      if (!ecefToScene) {
-        console.warn('[loadGltf] 场景变换不可用，无法进行地理配准。')
-        return
-      }
-      const matrix = createGeoReferenceMatrix(params, ecefToScene)
-      model.matrix.identity()
-      model.applyMatrix4(matrix)
     })
   }
 
@@ -721,10 +639,6 @@ export class TilesViewerController {
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(width, height, false)
     this.renderer.setPixelRatio(this.getPreferredPixelRatio())
-
-    // 同步后处理合成器与轮廓 pass 的尺寸（内部会按 pixelRatio 换算）
-    this.composer?.setSize(width, height)
-    this.composer?.setPixelRatio(this.getPreferredPixelRatio())
 
     // 与 demo 一致：窗口变化时重新同步瓦片 SSE 分辨率
     this.tilesRenderer?.setResolutionFromRenderer(this.camera, this.renderer)
@@ -797,51 +711,5 @@ export class TilesViewerController {
   /** 按真实设备像素比渲染，高分屏上限 2x 保护性能 */
   private getPreferredPixelRatio(): number {
     return THREE.MathUtils.clamp(window.devicePixelRatio || 1, 1, 2)
-  }
-
-  /** 同步 OutlinePass 的选中对象（白色轮廓跟随当前选中的 GLB 部件） */
-  private updateOutlineSelection(): void {
-    if (!this.outlinePass) return
-    const object = this.gltfModelLoader.getHighlightedObject()
-    this.outlinePass.selectedObjects = object ? [object] : []
-  }
-
-  // ========== 纹理质量增强 ==========
-
-  /** 提升模型纹理采样质量（各向异性 + 三线性过滤） */
-  private enhanceModelTextures(scene: THREE.Object3D): void {
-    const maxAnisotropy = this.renderer.capabilities.getMaxAnisotropy?.() ?? 16
-
-    scene.traverse((obj) => {
-      const mesh = obj as THREE.Mesh
-      if (!mesh.isMesh) return
-
-      const material = mesh.material
-      if (!material) return
-
-      const materials = Array.isArray(material) ? material : [material]
-      for (const mat of materials) {
-        if (!mat) continue
-
-        for (const key of Object.keys(mat)) {
-          const value = (mat as unknown as Record<string, unknown>)[key]
-          if (!value || !(value as THREE.Texture).isTexture) continue
-
-          const texture = value as THREE.Texture
-          texture.anisotropy = maxAnisotropy
-
-          const mipCount = Array.isArray(texture.mipmaps) ? texture.mipmaps.length : 0
-          if (mipCount > 1) {
-            texture.minFilter = THREE.LinearMipmapLinearFilter
-          } else if (!(texture instanceof THREE.CompressedTexture)) {
-            // 压缩纹理无法 GPU 生成 mipmap，保持 LinearFilter
-            texture.minFilter = THREE.LinearMipmapLinearFilter
-            texture.generateMipmaps = true
-          }
-
-          texture.needsUpdate = true
-        }
-      }
-    })
   }
 }
