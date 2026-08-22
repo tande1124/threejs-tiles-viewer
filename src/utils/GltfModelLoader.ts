@@ -94,6 +94,9 @@ export class GltfModelLoader {
     this.loader = new GLTFLoader()
     this.loader.setDRACOLoader(this.deps.dracoLoader)
     this.loader.setKTX2Loader(this.deps.ktx2Loader)
+    // 射线拾取启用所有图层，确保 Layer 1（GLB 内部层）的网格也能被点击命中
+    // （双相机模式下 GLB 网格被设到 Layer 1，Raycaster 默认只检测 Layer 0）
+    this.raycaster.layers.enableAll()
   }
 
   /** 加载并渲染一个 GLTF/GLB 模型，返回模型根节点 */

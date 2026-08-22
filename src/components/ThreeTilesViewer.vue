@@ -53,7 +53,7 @@ const DEFAULT_GLTF_GEO = {
   centralMeridianDeg: 114,
   offsetX: 460019.023,
   offsetY: 3939980.213,
-  offsetZ: 50,  // offsetZ 每 +1 → 模型整体抬高 1 米。当前是 -49.154：
+  offsetZ: 0,  // offsetZ 每 +1 → 模型整体抬高 1 米。当前是 -49.154：
   verticalScale: 1,
 }
 

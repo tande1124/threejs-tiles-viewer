@@ -142,6 +142,9 @@ export class PointMarkerRenderer {
     pointSprite.scale.set(markerScale, markerScale, 1)
     pointSprite.position.copy(pointPosition)
     pointSprite.renderOrder = 8 // 较高的渲染顺序，确保在其他内容之上显示
+    // 同时在 Layer 0（外相机）和 Layer 1（内相机）可见，
+    // 确保点位图标不会被 GLB 叠加层遮挡
+    pointSprite.layers.enable(1)
 
     this.markerRoot.add(pointSprite)
     this.pointSprite = pointSprite

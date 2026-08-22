@@ -78,6 +78,12 @@ export class TilesViewerController {
   private readonly resizeObserver = new ResizeObserver(() => this.handleResize())
   private readonly pointMarkerRenderer: PointMarkerRenderer
 
+  // ---- 双相机透视：Layer 0 外壳（3D Tiles）/ Layer 1 内部（GLB） ----
+  private readonly camInner = new THREE.PerspectiveCamera(45, 1, 1, 1e7)
+  private readonly rtInner = new THREE.WebGLRenderTarget(1, 1)
+  private readonly sceneOverlay = new THREE.Scene()
+  private readonly camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10)
+
   // ---- 后处理（选中部件白色轮廓） ----
   private composer: EffectComposer | null = null
   private outlinePass: OutlinePass | null = null
@@ -109,6 +115,7 @@ export class TilesViewerController {
 
     // 天空、雾与背景
     this.skyBox = this.createSkyBox()
+    this.skyBox.layers.set(0) // 天空盒仅外相机（Layer 0）可见
     this.scene.fog = new THREE.Fog(
       new THREE.Color(SKY_BACKGROUND.fog),
       SKY_BACKGROUND.fogNear,
@@ -117,16 +124,20 @@ export class TilesViewerController {
     this.scene.background = new THREE.Color(SKY_BACKGROUND.bottom)
 
     // 三级光照：半球光 + 主方向光 + 补光
+    // 所有灯光 enableAll，保证 Layer 0（外壳）和 Layer 1（内部）相机都能看到
     const hemisphereLight = new THREE.HemisphereLight('#dbeafe', '#020617', 1.35)
     hemisphereLight.position.set(0, 1, 0)
+    hemisphereLight.layers.enableAll()
     this.scene.add(hemisphereLight)
 
     const directionalLight = new THREE.DirectionalLight('#ffffff', 1.65)
     directionalLight.position.set(120, 180, 90)
+    directionalLight.layers.enableAll()
     this.scene.add(directionalLight)
 
     const fillLight = new THREE.DirectionalLight('#93c5fd', 0.85)
     fillLight.position.set(-100, 60, -80)
+    fillLight.layers.enableAll()
     this.scene.add(fillLight)
 
     this.tilesetRoot.name = 'tileset-root'
@@ -145,6 +156,22 @@ export class TilesViewerController {
         this.updateOutlineSelection()
       },
     })
+
+    // ---- 双相机透视基础设施 ----
+    // 外相机（Layer 0）看 3D Tiles 外壳，内相机（Layer 1）看 GLB 内部结构
+    this.camera.layers.set(0)
+    this.camInner.layers.set(1)
+    this.rtInner.texture.colorSpace = THREE.SRGBColorSpace
+
+    // 全屏面片 + 正交场景：把内部渲染纹理叠加到屏幕顶层
+    const quadMat = new THREE.MeshBasicMaterial({
+      map: this.rtInner.texture,
+      transparent: true,  // 启用纹理 alpha，外壳才能透出来
+      depthTest: false,   // 叠加层永远绘制在场景之上
+      depthWrite: false,
+    })
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), quadMat)
+    this.sceneOverlay.add(quad)
 
     // 启用 GLB 部件点击拾取（点击部件回调 onGltfPick，点击空白回调 null）
     this.gltfModelLoader.enablePicking(this.camera, this.renderer.domElement)
@@ -172,6 +199,7 @@ export class TilesViewerController {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.NoToneMapping
     this.renderer.toneMappingExposure = 1
+    this.renderer.autoClear = false // 手动控制清屏，保证三步渲染互不干扰
   }
 
   /** 创建跟随相机的渐变立方体天空盒（含程序化白云） */
@@ -288,7 +316,7 @@ export class TilesViewerController {
     ;(window as unknown as { __tilesViewer?: TilesViewerController }).__tilesViewer = this
   }
 
-  /** 加载 3D Tiles（demo 同款：创建 → setCamera/setResolution → 挂 group） */
+  /** 加载 3D  同款：创建 → setCamera/setResolution → 挂 group） */
   async loadScene(sources: TilesetSourceConfig[]): Promise<void> {
     if (!this.container) {
       throw new Error('Three.js 容器尚未挂载。')
@@ -306,18 +334,30 @@ export class TilesViewerController {
     await (this.renderer as THREE.WebGLRenderer & { init?: () => Promise<void> }).init?.()
     this.ktx2Loader.detectSupport(this.renderer)
 
-    // ---- 加载 3D Tiles 作为外壳（demo 同款）----
+    // ---- 加载 3D Tiles 作为外壳（Layer 0）----
     this.tilesetSource = source
     this.tilesRenderer = new TilesRenderer(source.url)
     this.tilesRenderer.setCamera(this.camera)
     this.tilesRenderer.setResolutionFromRenderer(this.camera, this.renderer)
 
+    // 降低 SSE 阈值（默认 16px → 4px），让 TilesRenderer 加载更高层级的细节瓦片
+    // 值越小，放大后越清晰，但会增加 GPU/内存开销
+    this.tilesRenderer.errorTarget = 0
+    // 提高瓦片解析并发数（默认 5 → 10），加速高清瓦片加载
+    this.tilesRenderer.parseQueue.maxJobs = 10
+
     // 坐标 recenter（大坐标 ECEF 场景归到原点附近）
     this.tilesRenderer.registerPlugin(new ReorientationPlugin({ up: '+z', recenter: true }))
-    // Vite 静态服务器不解析 %2B：瓦片路径里的 %2B 会拿到 SPA 回退页，必须解码回 '+'
-    this.tilesRenderer.registerPlugin({
-      preprocessURL: (url: string) => url.replace(/%2B/gi, '+'),
+
+    // 所有瓦片网格分配到 Layer 0（外壳层），仅外相机可见
+    this.tilesRenderer.addEventListener('load-model', ({ scene }: { scene: THREE.Object3D }) => {
+      scene.traverse((obj: THREE.Object3D) => {
+        if ((obj as THREE.Mesh).isMesh) {
+          obj.layers.set(0)
+        }
+      })
     })
+
 
     // tileset 加载完成后，ReorientationPlugin 已把瓦片集居中到原点并调整为 +Y 上，
     // 这里只记录场景范围并聚焦相机（v0.5.1 事件名为 load-root-tileset）
@@ -382,6 +422,13 @@ export class TilesViewerController {
     if (geo) {
       await this.applyGeoReference(model, geo)
     }
+
+    // 遍历设置所有子对象为 Layer 1（内部层），仅内相机可见
+    model.traverse((obj: THREE.Object3D) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        obj.layers.set(1)
+      }
+    })
 
     if (options.fitCamera !== false) {
       this.hasSettledView = false
@@ -514,6 +561,7 @@ export class TilesViewerController {
     this.controls.dispose()
     this.ktx2Loader.dispose()
     this.dracoLoader.dispose()
+    this.rtInner.dispose()
 
     disposeObject3D(this.scene)
     this.scene.clear()
@@ -544,14 +592,38 @@ export class TilesViewerController {
         }
       }
 
+      // 内部相机姿态完全复制外部相机（位置/朝向/投影同步）
+      this.camInner.copy(this.camera)
+      this.camInner.layers.set(1)
+
       // 天空盒跟随相机，保证任意缩放距离下背景始终环绕视角
       this.skyBox.position.copy(this.camera.position)
 
-      if (this.composer) {
-        this.composer.render()
-      } else {
-        this.renderer.render(this.scene, this.camera)
-      }
+      // 1. 渲染内部结构到 RenderTarget 纹理（透明背景，只画 Layer 1 的 GLB）
+      //    scene.background 和 fog 必须临时禁用，否则 Three.js 会在 render() 内部
+      //    用 scene.background 填充 render target，导致纹理背景不透明、覆盖外壳
+      const savedBackground = this.scene.background
+      const savedFog = this.scene.fog
+      this.scene.background = null
+      this.scene.fog = null
+
+      this.renderer.setRenderTarget(this.rtInner)
+      this.renderer.setClearColor(0x000000, 0) // alpha=0 → 纹理背景透明
+      this.renderer.clear(true, true, false)
+      this.renderer.render(this.scene, this.camInner)
+
+      // 恢复背景和雾效
+      this.scene.background = savedBackground
+      this.scene.fog = savedFog
+
+      // 2. 渲染外壳到屏幕（Layer 0 的 3D Tiles + 天空盒）
+      this.renderer.setRenderTarget(null)
+      this.renderer.clear(true, true, false)
+      this.renderer.render(this.scene, this.camera)
+
+      // 3. 叠加内部纹理：只清深度、保留外壳颜色，把内部画面合成到最上层
+      this.renderer.clearDepth()
+      this.renderer.render(this.sceneOverlay, this.camOrtho)
     }
 
     renderFrame()
@@ -656,6 +728,11 @@ export class TilesViewerController {
 
     // 与 demo 一致：窗口变化时重新同步瓦片 SSE 分辨率
     this.tilesRenderer?.setResolutionFromRenderer(this.camera, this.renderer)
+
+    // 同步内相机与渲染目标尺寸
+    this.camInner.aspect = width / height
+    this.camInner.updateProjectionMatrix()
+    this.rtInner.setSize(width, height)
   }
 
   // ========== 相机聚焦 ==========
