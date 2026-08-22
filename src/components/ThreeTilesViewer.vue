@@ -34,10 +34,7 @@
 
 <script lang="ts">
 import { defineComponent, markRaw } from 'vue'
-import {
-  TilesViewerController,
-  type ViewerStatus,
-} from '@/utils/TilesViewerController'
+import { TilesViewerController } from '@/utils/TilesViewerController'
 import { getDefaultSceneConfig } from '@/utils/tileset'
 import type { GltfPickInfo } from '@/utils/GltfModelLoader'
 import PointLocatorForm, {
@@ -110,7 +107,6 @@ export default defineComponent({
 
       this.controller = markRaw(
         new TilesViewerController({
-          onStatusChange: this.handleStatusChange,
           onGltfPick: this.handleGltfPick,
         }),
       )
@@ -128,13 +124,6 @@ export default defineComponent({
       } catch (error) {
         console.error('GLTF 模型加载失败。', error)
       }
-    },
-
-    handleStatusChange(status: ViewerStatus) {
-      if (status.state !== 'error') {
-        return
-      }
-      console.error('3DTiles 资源加载失败。', status.error || status.message)
     },
 
     /**

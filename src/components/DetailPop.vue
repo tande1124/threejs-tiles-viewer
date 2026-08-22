@@ -118,7 +118,7 @@ export default defineComponent({
 <style scoped>
 .detail-pop {
   position: absolute;
-  top: 150px; /* 让出顶部区域 */
+  top: 20px; /* 让出顶部区域 */
   left: 20px;
   width: 300px;
   border: 1px solid rgba(148, 163, 184, 0.2);
