@@ -6,7 +6,6 @@ import { TilesRenderer } from '3d-tiles-renderer'
 import { ReorientationPlugin } from '3d-tiles-renderer/three/plugins'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js'
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js'
 import { disposeObject3D } from '@/utils/three-dispose'
 import { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
 import {
@@ -82,15 +81,9 @@ export class TilesViewerController {
   private readonly axesHelper = new THREE.AxesHelper(1)
   private axesVisible = true
 
-  // ---- 后处理（X光透视 + 选中部件白色轮廓） ----
+  // ---- 后处理（选中部件白色轮廓） ----
   private composer: EffectComposer | null = null
   private outlinePass: OutlinePass | null = null
-  /** 是否启用 X光透视合成（默认关闭，相关 pass/纹理由调用方按需构建） */
-  private xrayEnabled = false
-  /** GLB 单独渲染的透明纹理（透视叠加层） */
-  private gltfLayerTarget: THREE.WebGLRenderTarget | null = null
-  /** 把 GLB 层纹理合成到主画面的 pass */
-  private xrayPass: ShaderPass | null = null
 
   // ---- 3D Tiles 状态 ----
   private container: HTMLElement | null = null
@@ -535,12 +528,8 @@ export class TilesViewerController {
     this.clearTileset()
     this.pointMarkerRenderer.dispose()
     this.outlinePass?.dispose()
-    this.xrayPass?.dispose()
-    this.gltfLayerTarget?.dispose()
     this.composer?.dispose()
     this.outlinePass = null
-    this.xrayPass = null
-    this.gltfLayerTarget = null
     this.composer = null
     this.controls.dispose()
     this.ktx2Loader.dispose()
@@ -577,11 +566,6 @@ export class TilesViewerController {
 
       // 天空盒跟随相机，保证任意缩放距离下背景始终环绕视角
       this.skyBox.position.copy(this.camera.position)
-
-      // X光透视：先把 GLB 单独渲染到透明纹理，供合成 pass 采样
-      if (this.xrayEnabled) {
-        this.renderGltfLayer()
-      }
 
       if (this.composer) {
         this.composer.render()
@@ -690,13 +674,6 @@ export class TilesViewerController {
     this.composer?.setSize(width, height)
     this.composer?.setPixelRatio(this.getPreferredPixelRatio())
 
-    // 同步 X光透视 GLB 层纹理尺寸（与合成器有效尺寸一致）
-    const layerDpr = this.getPreferredPixelRatio()
-    this.gltfLayerTarget?.setSize(
-      Math.max(Math.round(width * layerDpr), 1),
-      Math.max(Math.round(height * layerDpr), 1),
-    )
-
     // 与 demo 一致：窗口变化时重新同步瓦片 SSE 分辨率
     this.tilesRenderer?.setResolutionFromRenderer(this.camera, this.renderer)
   }
@@ -766,41 +743,6 @@ export class TilesViewerController {
   /** 按真实设备像素比渲染，高分屏上限 2x 保护性能 */
   private getPreferredPixelRatio(): number {
     return THREE.MathUtils.clamp(window.devicePixelRatio || 1, 1, 2)
-  }
-
-  /** 把 GLB（gltf-root）单独渲染到透明纹理，作为透视叠加层（保留 GLB 内部深度） */
-  private renderGltfLayer(): void {
-    const target = this.gltfLayerTarget
-    if (!target) return
-
-    const prevBackground = this.scene.background
-    const prevClearColor = this.renderer.getClearColor(new THREE.Color())
-    const prevClearAlpha = this.renderer.getClearAlpha()
-
-    // 隐藏非 GLB 内容（含天空盒/背景），只渲染 gltf-root；光照保持可见
-    const hidden: Array<{ object: THREE.Object3D; visible: boolean }> = []
-    const hide = (object: THREE.Object3D | null) => {
-      if (!object) return
-      hidden.push({ object, visible: object.visible })
-      object.visible = false
-    }
-    hide(this.tilesetRoot)
-    hide(this.markerRoot)
-    hide(this.skyBox)
-    hide(this.axesHelper)
-
-    this.scene.background = null
-    this.renderer.setClearColor(0x000000, 0)
-    this.renderer.setRenderTarget(target)
-    this.renderer.clear(true, true, true)
-    this.renderer.render(this.scene, this.camera)
-
-    for (const item of hidden) {
-      item.object.visible = item.visible
-    }
-    this.scene.background = prevBackground
-    this.renderer.setClearColor(prevClearColor, prevClearAlpha)
-    this.renderer.setRenderTarget(null)
   }
 
   /** 同步 OutlinePass 的选中对象（白色轮廓跟随当前选中的 GLB 部件） */
