@@ -77,9 +77,6 @@ export class TilesViewerController {
   private readonly ktx2Loader = new KTX2Loader()
   private readonly resizeObserver = new ResizeObserver(() => this.handleResize())
   private readonly pointMarkerRenderer: PointMarkerRenderer
-  /** 坐标轴辅助线（X 红 / Y 绿 / Z 蓝），单位尺寸创建、按场景包围盒缩放 */
-  private readonly axesHelper = new THREE.AxesHelper(1)
-  private axesVisible = true
 
   // ---- 后处理（选中部件白色轮廓） ----
   private composer: EffectComposer | null = null
@@ -136,12 +133,6 @@ export class TilesViewerController {
     this.markerRoot.name = 'marker-root'
     this.scene.add(this.tilesetRoot)
     this.scene.add(this.markerRoot)
-
-    // 坐标轴辅助线：关闭雾化避免远处被雾吞没，较高 renderOrder 使其叠加在模型之上
-    ;(this.axesHelper.material as THREE.LineBasicMaterial).fog = false
-    this.axesHelper.renderOrder = 100
-    this.axesHelper.name = 'axes-helper'
-    this.scene.add(this.axesHelper)
 
     // GLTF/GLB 模型加载器：维护独立的 gltf-root 容器，复用 DRACO/KTX2 解压
     this.gltfModelLoader = new GltfModelLoader({
@@ -441,17 +432,6 @@ export class TilesViewerController {
     this.updateOutlineSelection()
   }
 
-  /** 设置坐标轴辅助线是否显示 */
-  setAxesVisible(visible: boolean): void {
-    this.axesVisible = visible
-    this.axesHelper.visible = visible
-  }
-
-  /** 当前坐标轴辅助线是否显示 */
-  getAxesVisible(): boolean {
-    return this.axesVisible
-  }
-
   /** 获取瓦片图层及其显隐状态，供 UI 渲染 */
   getLayerList(): Array<{ id: string; name: string; kind: SceneSourceKind; visible: boolean }> {
     if (!this.tilesRenderer || !this.tilesetSource) return []
@@ -717,9 +697,6 @@ export class TilesViewerController {
     const center = box.getCenter(new THREE.Vector3())
     const maxDimension = Math.max(size.x, size.y, size.z)
     const safeDimension = maxDimension > 0 ? maxDimension : 10
-
-    // 坐标轴辅助线长度约为场景包围盒最长边的一半，保持与地形/模型的相对尺度一致
-    this.axesHelper.scale.setScalar(safeDimension * 0.5)
 
     const halfFov = THREE.MathUtils.degToRad(this.camera.fov * 0.5)
     const distance = safeDimension / (2 * Math.tan(halfFov))
