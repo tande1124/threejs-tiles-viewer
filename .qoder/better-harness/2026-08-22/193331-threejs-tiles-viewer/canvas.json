@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 2,
+  "summary": {
+    "projectName": "threejs-tiles-viewer",
+    "locale": "zh-CN",
+    "modelId": "agent-work-loop-v4",
+    "reportContractVersion": 26,
+    "overview": "项目处于早期开发阶段（11天、21次提交），核心模块 src/utils 集中了大量变更但缺乏项目级代理指令、自动化验证和交付管线，属于 Bootstrap 阶段。",
+    "dimensions": [
+      {
+        "id": "task-understanding",
+        "label": "任务理解",
+        "score": 28,
+        "summary": "项目缺少 AGENTS.md，代理只能依赖 README 和 package.json 获取基础上下文，无法获得架构约定和安全边界的项目级指导。",
+        "findingRefs": [
+          "missing-project-agent-instructions"
+        ]
+      },
+      {
+        "id": "controlled-execution",
+        "label": "可控执行",
+        "score": 42,
+        "summary": "package.json 提供 dev/build/typecheck 脚本，但缺少设置引导、状态重置和权限边界声明。",
+        "findingRefs": [
+          "validation-scripts-not-enforced"
+        ]
+      },
+      {
+        "id": "change-validation",
+        "label": "改动验证",
+        "score": 18,
+        "summary": "10 个源文件无任何测试文件，无 lint 配置，无 CI 流水线。typecheck 脚本存在但未被任何强制机制触发。",
+        "findingRefs": [
+          "high-churn-core-without-automated-validation",
+          "validation-scripts-not-enforced"
+        ]
+      },
+      {
+        "id": "reliable-delivery",
+        "label": "可靠交付",
+        "score": 22,
+        "summary": "仅有 git 本地提交历史，无 CI/CD 配置或部署管线，交付完全依赖手动操作。",
+        "findingRefs": [
+          "no-delivery-validation-pipeline"
+        ]
+      },
+      {
+        "id": "learning-capture",
+        "label": "经验沉淀",
+        "score": 35,
+        "summary": "无可观察的会话数据，无法评估重复工作模式或学习改进。",
+        "findingRefs": []
+      }
+    ],
+    "aiAgentPractice": {
+      "inspectedSurfaces": [
+        "Skills",
+        "Hooks",
+        "Plugins",
+        "Rules",
+        "Commands",
+        "Custom Agents",
+        "MCP",
+        "Workflows",
+        "Memories"
+      ],
+      "coverageRows": [
+        {
+          "surface": "Skills",
+          "scopes": [
+            "Global",
+            "Plugin"
+          ],
+          "count": 13,
+          "paths": [
+            "~/.agents/skills/firecrawl/SKILL.md",
+            "~/.agents/skills/firecrawl-agent/SKILL.md",
+            "~/.agents/skills/firecrawl-crawl/SKILL.md",
+            "~/.agents/skills/firecrawl-download/SKILL.md",
+            "~/.agents/skills/firecrawl-interact/SKILL.md"
+          ]
+        },
+        {
+          "surface": "Hooks",
+          "scopes": [
+            "Plugin"
+          ],
+          "count": 2,
+          "paths": [
+            "~/.qoder/plugins/cache/qoder-bundler/security-scan/.qoder-plugin/qoder-hooks.json"
+          ]
+        },
+        {
+          "surface": "Plugins",
+          "scopes": [
+            "Plugin"
+          ],
+          "count": 3,
+          "paths": [
+            "~/.qoder/plugins/cache/qoder-bundler/better-harness/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-bundler/qoder-create-plugin",
+            "~/.qoder/plugins/cache/qoder-bundler/security-scan/.qoder-plugin/plugin.json"
+          ]
+        },
+        {
+          "surface": "Rules",
+          "scopes": [
+            "Project"
+          ],
+          "count": 0
+        },
+        {
+          "surface": "Commands",
+          "scopes": [
+            "Project"
+          ],
+          "count": 0
+        },
+        {
+          "surface": "Custom Agents",
+          "scopes": [
+            "Project"
+          ],
+          "count": 0
+        },
+        {
+          "surface": "MCP",
+          "scopes": [
+            "Project"
+          ],
+          "count": 0
+        },
+        {
+          "surface": "Workflows",
+          "scopes": [
+            "Project"
+          ],
+          "count": 0
+        },
+        {
+          "surface": "Memories",
+          "scopes": [
+            "Project"
+          ],
+          "count": 0
+        }
+      ]
+    },
+    "assignmentSummaries": []
+  },
+  "findings": [
+    {
+      "id": "missing-project-agent-instructions",
+      "title": "代理缺少项目级指令，无法获得架构约定和安全边界指导",
+      "severity": "Medium",
+      "reason": "项目没有 AGENTS.md 文件。6 个核心工具类（TilesViewerController.ts、GltfModelLoader.ts、PointMarkerRenderer.ts、tileset.ts、geo-coordinate.ts、three-dispose.ts）集中在 src/utils 下，涉及 Three.js/WebGL 的双相机架构、图层配置、GLB 交互等特定约定。代理只能依赖 README 标题和 package.json 脚本获取上下文，无法了解项目的架构决策、安全约束或变更规范。",
+      "dimensionRefs": [
+        "task-understanding"
+      ],
+      "aiFixPrompt": "/better-harness fix this issue\n\n在项目根目录创建 AGENTS.md，包含以下内容：\n1. 项目概述（Three.js 3D Tiles 查看器）\n2. 技术栈（Vite + TypeScript + Three.js + Vue 3）\n3. 开发命令（npm run dev / build / typecheck）\n4. 核心架构说明（src/utils 下的模块职责）\n5. 变更安全约束\n\n## 验证\n\n- 确认 AGENTS.md 文件已创建且路由到 src/utils 下的核心模块\n- 确认文件包含了项目的技术栈和开发命令",
+      "expectedArtifact": "Document",
+      "expectedOutput": [
+        "Update the existing Document owner identified by the reviewed evidence and retain a focused validation result."
+      ]
+    },
+    {
+      "id": "high-churn-core-without-automated-validation",
+      "title": "高频变更的核心模块缺乏任何自动化验证覆盖",
+      "severity": "Medium",
+      "reason": "项目 10 个源文件中没有测试文件（0 test files），也没有 lint 配置或 CI 流水线。最活跃的核心文件 src/utils/TilesViewerController.ts 在全部 21 次提交中被修改了 19 次（churn 5369 行：3042 行新增、2327 行删除），但每次变更只能依赖手动启动开发服务器进行视觉验证，没有自动化的类型检查、lint 或行为测试。",
+      "dimensionRefs": [
+        "change-validation"
+      ],
+      "aiFixPrompt": "/better-harness fix this issue\n\n为变更验证建立最小可行管线：\n1. 确认 npm run typecheck 可以正确执行\n2. 添加 pre-commit 钩子（如 husky + lint-staged）自动运行 typecheck\n3. 考虑为核心模块添加基础单元测试\n\n## 验证\n\n- 运行 npm run typecheck 确认通过\n- 修改一个核心文件后确认 typecheck 被自动触发",
+      "expectedArtifact": "Config",
+      "expectedOutput": [
+        "Update the existing Config owner identified by the reviewed evidence and retain a focused validation result."
+      ]
+    },
+    {
+      "id": "validation-scripts-not-enforced",
+      "title": "可用的验证脚本未连接到任何强制执行路径",
+      "severity": "Low",
+      "reason": "package.json 中定义了 typecheck 和 build 脚本，具备基础的类型安全和编译验证能力。但这些脚本没有被任何强制机制触发：没有 pre-commit 钩子、没有 CI 配置（无 .github/workflows 目录）、没有 lint-staged 或 husky 配置。代理可以在修改代码后跳过这些检查而不会收到任何提示。",
+      "dimensionRefs": [
+        "change-validation",
+        "controlled-execution"
+      ],
+      "aiFixPrompt": "/better-harness fix this issue\n\n将现有验证脚本连接到强制执行路径：\n1. 安装 husky 并配置 pre-commit 钩子运行 typecheck\n2. 或添加 GitHub Actions CI 配置在 push/PR 时运行 typecheck 和 build\n\n## 验证\n\n- 确认 git commit 时自动触发 typecheck\n- 或确认 push 后 CI 自动运行验证",
+      "expectedArtifact": "Config",
+      "expectedOutput": [
+        "Update the existing Config owner identified by the reviewed evidence and retain a focused validation result."
+      ]
+    },
+    {
+      "id": "no-delivery-validation-pipeline",
+      "title": "项目没有自动化交付或集成验证管线",
+      "severity": "Low",
+      "reason": "项目仅有本地 git 提交历史（21 次提交，跨度 11 天），没有 CI/CD 配置、部署脚本或发布流程。npm run build 和 npm run preview 可用，但完全依赖手动操作。对于涉及 WebGL 渲染、3D Tiles 加载和 GLB 模型交互的项目，缺少自动化构建验证意味着集成问题只能在运行时被发现。",
+      "dimensionRefs": [
+        "reliable-delivery"
+      ],
+      "aiFixPrompt": "/better-harness fix this issue\n\n添加基础 CI 流水线：\n1. 创建 .github/workflows/ci.yml\n2. 在 push 和 PR 事件触发时运行 typecheck 和 build\n3. 确保构建产物可验证\n\n## 验证\n\n- 推送代码后确认 CI 运行了 typecheck 和 build\n- 确认 CI 结果与代码变更关联",
+      "expectedArtifact": "Config",
+      "expectedOutput": [
+        "Update the existing Config owner identified by the reviewed evidence and retain a focused validation result."
+      ]
+    }
+  ]
+}
