@@ -35,7 +35,7 @@
 <script lang="ts">
 import { defineComponent, markRaw } from 'vue'
 import { TilesViewerController } from '@/utils/TilesViewerController'
-import { getDefaultSceneConfig } from '@/utils/tileset'
+import { getDefaultSceneConfig } from '@/utils/common/tileset'
 import type { GltfPickInfo } from '@/utils/GltfModelLoader'
 import PointLocatorForm, {
   type PointSubmitPayload,

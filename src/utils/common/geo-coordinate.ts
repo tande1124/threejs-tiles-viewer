@@ -140,7 +140,7 @@ export function ecefDirectionToScene(
 /**
  * 获取 WGS84 椭球面在指定经纬度处的外法线方向（ECEF 坐标系）。
  *
- * 该方向用于在使用 ReorientationPlugin 后计算场景中的“向上”方向，
+ * 该方向用于在使用 ReorientationPlugin 后计算场景中的"向上"方向，
  * 不应直接使用 ECEF 的固定坐标轴作为局部地表法线。
  */
 export function lonLatToEcefUp(longitude: number, latitude: number): THREE.Vector3 {

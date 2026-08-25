@@ -2,12 +2,12 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js'
-import { disposeObject3D } from '@/utils/three-dispose'
+import { disposeObject3D } from '@/utils/common/three-dispose'
 import {
   calibrateGeoReferenceFromAnchor,
   createGeoReferenceMatrix,
   type GeoReferenceParams,
-} from '@/utils/geo-coordinate'
+} from '@/utils/common/geo-coordinate'
 
 /** GLTF/GLB 加载选项 */
 export interface GltfLoadOptions {

@@ -1,17 +1,17 @@
 <template>
   <main class="app-shell">
-    <ThreeTilesViewer />
+    <ThreeViewer />
   </main>
 </template>
 
 <script lang="ts">
 import { defineComponent } from 'vue'
-import ThreeTilesViewer from '@/components/ThreeTilesViewer.vue'
+import ThreeViewer from '@/components/index.vue'
 
 export default defineComponent({
   name: 'App',
   components: {
-    ThreeTilesViewer,
+    ThreeViewer,
   },
 })
 </script>

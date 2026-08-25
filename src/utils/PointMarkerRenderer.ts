@@ -4,7 +4,7 @@ import {
   ecefToScenePosition,
   lonLatHeightToEcef,
   lonLatToEcefUp,
-} from '@/utils/geo-coordinate'
+} from '@/utils/common/geo-coordinate'
 
 /** 经纬度点位精灵图标资源路径 */
 const POINT_ICON_URL = '/img/boxCamera.svg'

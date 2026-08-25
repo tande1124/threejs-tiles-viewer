@@ -48,7 +48,7 @@
 
 <script lang="ts">
 import { defineComponent } from 'vue'
-import { gaussKrugerInverse, type GeoReferenceParams } from '@/utils/geo-coordinate'
+import { gaussKrugerInverse, type GeoReferenceParams } from '@/utils/common/geo-coordinate'
 import type { GltfPickInfo } from '@/utils/GltfModelLoader'
 
 /** 由模型局部坐标 + 配准参数换算出的地理坐标 */
