@@ -390,7 +390,7 @@ export class TilesViewerController {
     // ---- 天空可见性（对齐 applySky）----
     this.sky.visible = cfg.sky.enabled
 
-    if (cfg.sky.enabled) {
+    if (!cfg.sky.enabled) {
       // ---- 加载 HDR 环境贴图（studio.exr）----
       await this.loadHdrEnvironment(cfg.environment.hdrPath)
     }
