@@ -384,11 +384,16 @@ export class TilesViewerController {
     // ---- 从天空烘焙 PMREM 环境贴图 ----
     this.bakeSkyEnvMap()
 
-    // ---- 加载 HDR 环境贴图（studio.exr）----
-    await this.loadHdrEnvironment(cfg.environment.hdrPath)
+
+
 
     // ---- 天空可见性（对齐 applySky）----
     this.sky.visible = cfg.sky.enabled
+
+    if (cfg.sky.enabled) {
+      // ---- 加载 HDR 环境贴图（studio.exr）----
+      await this.loadHdrEnvironment(cfg.environment.hdrPath)
+    }
 
 
     // ---- 环境强度 & 背景（对齐 applyAllParams 中 envInt / bgInt 逻辑）----
