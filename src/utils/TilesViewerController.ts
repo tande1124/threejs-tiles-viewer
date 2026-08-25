@@ -93,6 +93,8 @@ export class TilesViewerController {
   private readonly sceneBounds = new THREE.Box3()
   /** 用户手动操作后禁止后续自动聚焦覆盖视角 */
   private hasSettledView = false
+  /** 首次相机聚焦是否完成（用于控制画布淡入） */
+  private firstFitDone = false
   private animationFrameId = 0
   private fitTimerId = 0
   private groundingTimerId = 0
@@ -173,12 +175,12 @@ export class TilesViewerController {
       getFallbackBounds: () => this.sceneBounds,
     })
 
-    this.camera.position.set(160, 140, 180)
+    this.camera.position.set(0, 3000, 4000)
 
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.08
     this.controls.minDistance = 1
-    this.controls.maxDistance = 10000
+    this.controls.maxDistance = 50000
     this.controls.target.set(0, 0, 0)
     // 用户手动操作后禁止后续自动聚焦覆盖视角
     this.controls.addEventListener('start', () => {
@@ -190,6 +192,10 @@ export class TilesViewerController {
     this.renderer.toneMapping = THREE.NoToneMapping
     this.renderer.toneMappingExposure = 1
     this.renderer.autoClear = false // 手动控制清屏，保证三步渲染互不干扰
+
+    // 画布初始隐藏，等首次相机聚焦就位后淡入，避免看到中间状态
+    this.renderer.domElement.style.opacity = '0'
+    this.renderer.domElement.style.transition = 'opacity 0.6s ease'
   }
 
   // ========== 公共方法 ==========
@@ -282,7 +288,18 @@ export class TilesViewerController {
         )
       }
       this.tilesetReady = true
-      this.scheduleCameraFit()
+
+      // 立即用 bounding sphere 完整范围聚焦相机（不等瓦片逐步加载），然后淡入画布
+      if (!this.hasSettledView && !this.sceneBounds.isEmpty()) {
+        const box = new THREE.Box3().copy(this.sceneBounds)
+        const gltfBox = new THREE.Box3().setFromObject(this.gltfModelLoader.root)
+        if (!gltfBox.isEmpty()) box.union(gltfBox)
+        this.fitCameraToBox(box)
+      }
+      if (!this.firstFitDone) {
+        this.firstFitDone = true
+        this.renderer.domElement.style.opacity = '1'
+      }
     })
 
     this.tilesetRoot.add(this.tilesRenderer.group)
@@ -730,7 +747,7 @@ export class TilesViewerController {
     }, delay)
   }
 
-  /** 延迟触发相机自动聚焦（防抖 160ms），用户已手动操作则跳过 */
+  /** 延迟触发相机自动聚焦（防抖 160ms），用于 GLTF 加载等后续场景变更 */
   private scheduleCameraFit(): void {
     if (this.hasSettledView) return
 
@@ -738,14 +755,25 @@ export class TilesViewerController {
     this.fitTimerId = window.setTimeout(() => {
       if (this.hasSettledView) return
 
-      this.tilesetRoot.updateMatrixWorld(true)
-      const box = new THREE.Box3().setFromObject(this.tilesetRoot)
-      box.union(new THREE.Box3().setFromObject(this.gltfModelLoader.root))
-      if (box.isEmpty() && !this.sceneBounds.isEmpty()) {
+      const box = new THREE.Box3()
+      if (!this.sceneBounds.isEmpty()) {
         box.copy(this.sceneBounds)
+        const gltfBox = new THREE.Box3().setFromObject(this.gltfModelLoader.root)
+        if (!gltfBox.isEmpty()) box.union(gltfBox)
+      } else {
+        this.tilesetRoot.updateMatrixWorld(true)
+        box.setFromObject(this.tilesetRoot)
+        box.union(new THREE.Box3().setFromObject(this.gltfModelLoader.root))
       }
+
       if (!box.isEmpty()) {
         this.fitCameraToBox(box)
+      }
+
+      // fallback: load-root-tileset 未触发淡入时补上
+      if (!this.firstFitDone) {
+        this.firstFitDone = true
+        this.renderer.domElement.style.opacity = '1'
       }
     }, 160)
   }

@@ -65,7 +65,7 @@ body {
 
 .tool-dialog {
   position: absolute;
-  top: 150px; /* 让出顶部图层控制卡片的位置 */
+  bottom: 100px; /* 让出顶部图层控制卡片的位置 */
   right: 20px;
   width: 360px;
   max-height: calc(100vh - 40px);

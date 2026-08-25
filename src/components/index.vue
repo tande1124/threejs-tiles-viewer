@@ -17,12 +17,28 @@
       </div>
     </el-card>
 
-    <PointLocatorForm
-      :submitting="isSubmittingPoint"
-      :error="pointError"
-      @submit="handlePointSubmit"
-      @clear="clearPoint"
-    />
+    <!-- 点位定位浮动按钮 -->
+    <button
+      class="fab-btn"
+      :class="{ active: showPointForm }"
+      title="经纬度定位"
+      @click="showPointForm = !showPointForm"
+    >
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+        <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 010-5 2.5 2.5 0 010 5z"/>
+      </svg>
+    </button>
+
+    <!-- 点位定位弹窗（点击按钮切换显隐，带滑入动画） -->
+    <Transition name="slide-panel">
+      <PointLocatorForm
+        v-if="showPointForm"
+        :submitting="isSubmittingPoint"
+        :error="pointError"
+        @submit="handlePointSubmit"
+        @clear="clearPoint"
+      />
+    </Transition>
 
     <DetailPop
       :info="pickInfo"
@@ -77,6 +93,8 @@ export default defineComponent({
       defaultSceneConfig: getDefaultSceneConfig(),
       pointError: '',
       isSubmittingPoint: false,
+      /** 点位定位表单是否展开 */
+      showPointForm: false,
       /** 点击 GLB 部件拾取的详情（null 表示未选中/弹窗关闭） */
       pickInfo: null as GltfPickInfo | null,
       /** 3D Tiles 图层列表（含显隐状态） */
@@ -239,5 +257,54 @@ export default defineComponent({
   color: #64748b;
   font-size: 12px;
   padding: 4px 0;
+}
+
+/* ========== 点位定位浮动按钮 ========== */
+
+.fab-btn {
+  position: absolute;
+  bottom: 28px;
+  right: 28px;
+  z-index: 110;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.88);
+  color: #94a3b8;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 4px 20px rgba(2, 6, 23, 0.4);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.fab-btn:hover {
+  color: #e2e8f0;
+  background: rgba(30, 41, 59, 0.95);
+  box-shadow: 0 6px 28px rgba(2, 6, 23, 0.55);
+  transform: scale(1.08);
+}
+
+.fab-btn.active {
+  color: #38bdf8;
+  background: rgba(15, 23, 42, 0.95);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.35), 0 6px 28px rgba(2, 6, 23, 0.55);
+}
+
+/* ========== 弹窗滑入/滑出动画 ========== */
+
+.slide-panel-enter-active,
+.slide-panel-leave-active {
+  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.slide-panel-enter-from,
+.slide-panel-leave-to {
+  transform: translateX(30px);
+  opacity: 0;
 }
 </style>
