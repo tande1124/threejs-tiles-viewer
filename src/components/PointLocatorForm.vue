@@ -27,8 +27,8 @@
       </el-form-item>
 
       <el-alert
-        v-if="displayedError"
-        :title="displayedError"
+        v-if="validationError"
+        :title="validationError"
         type="error"
         show-icon
         :closable="false"
@@ -52,50 +52,32 @@
 </template>
 
 <script lang="ts">
-import { defineComponent } from 'vue'
-
-/** 表单提交的经纬度点位数据 */
-export interface PointSubmitPayload {
-  longitude: number
-  latitude: number
-  height: number | undefined
-}
+import { defineComponent, type PropType } from 'vue'
+import type { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
 
 export default defineComponent({
   name: 'PointLocatorForm',
   props: {
-    /** 渲染中状态，控制按钮 loading 效果 */
-    submitting: {
-      type: Boolean,
-      default: false,
-    },
-    /** 由父组件传入的外部错误信息（如控制器调用失败） */
-    error: {
-      type: String,
-      default: '',
+    /** 经纬度点位渲染器实例，由父组件通过 controller.getPointMarkerRenderer() 传入 */
+    renderer: {
+      type: Object as PropType<PointMarkerRenderer | null>,
+      default: null,
     },
   },
-  emits: ['submit', 'clear'],
   data() {
     return {
       longitudeInput: '113.63908',
       latitudeInput: '35.611931',
       heightInput: '1505.4',
       validationError: '',
+      submitting: false,
     }
   },
-  computed: {
-    /** 优先展示本地校验错误，其次展示父组件传入的错误 */
-    displayedError(): string {
-      return this.validationError || this.error
-    },
-  },
   methods: {
-    /** 校验并提交经纬度，通过 submit 事件向父组件抛送合法数据 */
-    submitPoint(): void {
+    /** 校验输入并直接调用 PointMarkerRenderer 渲染点位、飞行定位 */
+    async submitPoint(): Promise<void> {
       const longitude = Number(this.longitudeInput)
       const latitude = Number(this.latitudeInput)
-      // 高程留空时传 undefined，由控制器自动贴合到模型表面
       const heightRaw = this.heightInput.trim()
       const hasHeight = heightRaw !== ''
       const height = hasHeight ? Number(heightRaw) : undefined
@@ -117,14 +99,28 @@ export default defineComponent({
         return
       }
 
+      if (!this.renderer) {
+        this.validationError = '场景控制器尚未初始化。'
+        return
+      }
+
       this.validationError = ''
-      this.$emit('submit', { longitude, latitude, height } satisfies PointSubmitPayload)
+      this.submitting = true
+
+      try {
+        await this.renderer.renderLonLatPoint(longitude, latitude, height)
+      } catch (error) {
+        this.validationError =
+          error instanceof Error ? error.message : '点位渲染失败，请稍后重试。'
+      } finally {
+        this.submitting = false
+      }
     },
 
-    /** 清除点位，通过 clear 事件通知父组件 */
+    /** 清除当前点位 */
     clearPoint(): void {
       this.validationError = ''
-      this.$emit('clear')
+      this.renderer?.clear()
     },
   },
 })

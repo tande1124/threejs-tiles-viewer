@@ -10,8 +10,8 @@ import { disposeObject3D } from '@/utils/common/three-dispose'
 import { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
 import {
   GltfModelLoader,
-  type GltfLoadOptions,
   type GltfPickInfo,
+  type ViewerCallbacks,
 } from '@/utils/GltfModelLoader'
 import type { SceneSourceKind, TilesetSourceConfig } from '@/utils/common/tileset'
 
@@ -33,16 +33,6 @@ interface EnvConfig {
 const ZOOM_LIMITS = {
   maxDistanceFactor: 1,
 } as const
-
-// ========== 接口定义 ==========
-
-export interface ViewerCallbacks {
-  /** 点击 GLB 模型部件时的回调（info 为 null 表示点击未命中模型，可关闭弹窗） */
-  onGltfPick?: (
-    info: GltfPickInfo | null,
-    position: { x: number; y: number } | null,
-  ) => void
-}
 
 // ========== 控制器 ==========
 
@@ -68,7 +58,7 @@ export class TilesViewerController {
   private readonly dracoLoader = new DRACOLoader()
   private readonly ktx2Loader = new KTX2Loader()
   private readonly resizeObserver = new ResizeObserver(() => this.handleResize())
-  private readonly pointMarkerRenderer: PointMarkerRenderer
+  private pointMarkerRenderer: PointMarkerRenderer
 
   // ---- 天空与环境 ----
   private readonly sky: Sky
@@ -147,6 +137,10 @@ export class TilesViewerController {
       onPick: (info, position) => {
         callbacks.onGltfPick?.(info, position)
       },
+      onRequestFitCamera: () => {
+        this.hasSettledView = false
+        this.scheduleCameraFit()
+      },
     })
 
     // ---- 双相机透视基础设施 ----
@@ -173,6 +167,8 @@ export class TilesViewerController {
       markerRoot: this.markerRoot,
       getTerrainGroup: () => this.findTerrainGroup(),
       getFallbackBounds: () => this.sceneBounds,
+      flyTo: (target) => this.flyTo(target),
+      onScheduleGrounding: (delay) => this.schedulePointGrounding(delay),
     })
 
     this.camera.position.set(0, 3000, 4000)
@@ -223,7 +219,7 @@ export class TilesViewerController {
       throw new Error('Three.js 容器尚未挂载。')
     }
 
-    this.clearLonLatPoint()
+    this.pointMarkerRenderer.clear()
     this.sceneBounds.makeEmpty()
     window.clearTimeout(this.fitTimerId)
     window.clearTimeout(this.groundingTimerId)
@@ -305,44 +301,14 @@ export class TilesViewerController {
     this.tilesetRoot.add(this.tilesRenderer.group)
   }
 
-  /** 渲染经纬度定位点并飞行到该点 */
-  async renderLonLatPoint(longitude: number, latitude: number, height?: number): Promise<void> {
-    const pointPosition = await this.pointMarkerRenderer.render(longitude, latitude, height)
-    this.flyTo(pointPosition)
-    this.schedulePointGrounding(1000)
+  /** 获取经纬度点位渲染器实例（供 PointLocatorForm 直接使用） */
+  getPointMarkerRenderer(): PointMarkerRenderer {
+    return this.pointMarkerRenderer
   }
 
-  /** 清除经纬度定位点 */
-  clearLonLatPoint(): void {
-    this.pointMarkerRenderer.clear()
-  }
-
-  /**
-   * 在场景中直接加载并渲染一个 GLTF/GLB 模型（委托给 GltfModelLoader）。
-   *
-   * @param url - 模型资源地址，如 './data/gltf/jfs-bim.glb'
-   * @param options.center - 是否把模型包围盒中心移到原点（默认 true；
-   *   提供 geo 配准时自动改为 false，由地理配准定位）
-   * @param options.geo - 地理配准参数：把 GLB 局部坐标自动映射到 CGCS2000 真实坐标，
-   *   再进入场景坐标系，位置与朝向一次到位（推荐方式）
-   * @param options.fitCamera - 加载完成后是否自动聚焦相机到包含模型在内的场景（默认 true）
-   * @returns 加载完成的模型根节点（THREE.Group）
-   */
-  async loadGltf(
-    url: string,
-    options: GltfLoadOptions & { fitCamera?: boolean } = {},
-  ): Promise<THREE.Group> {
-    const loadOptions: GltfLoadOptions = { layer: 1, ...options }
-    const model = options.geo
-      ? await this.gltfModelLoader.load(url, { ...loadOptions, center: false })
-      : await this.gltfModelLoader.load(url, loadOptions)
-
-    if (options.fitCamera !== false) {
-      this.hasSettledView = false
-      this.scheduleCameraFit()
-    }
-
-    return model
+  /** 获取 GLTF 模型加载器实例（供组件直接调用 loadGltf） */
+  getGltfModelLoader(): GltfModelLoader {
+    return this.gltfModelLoader
   }
 
   /** 用 NDC 坐标（-1 ~ 1，原点在画布中心）手动拾取 GLB 部件（调试工具） */

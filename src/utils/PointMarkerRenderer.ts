@@ -7,7 +7,7 @@ import {
 } from '@/utils/common/geo-coordinate'
 
 /** 经纬度点位精灵图标资源路径 */
-const POINT_ICON_URL = '/img/boxCamera.svg'
+const POINT_ICON_URL = './assets/img/boxCamera.svg'
 
 /**
  * 点位渲染器依赖项
@@ -24,6 +24,10 @@ export interface PointMarkerRendererOptions {
   getTerrainGroup: () => THREE.Group | null
   /** 获取场景元数据包围盒：当实际几何尚未加载时作为尺度估算回退 */
   getFallbackBounds: () => THREE.Box3
+  /** 飞行到目标点的回调（由控制器注入） */
+  flyTo?: (target: THREE.Vector3) => void
+  /** 延迟重新贴地的回调（由控制器注入，接收延迟毫秒数） */
+  onScheduleGrounding?: (delay: number) => void
 }
 
 /**
@@ -45,6 +49,10 @@ export class PointMarkerRenderer {
   private readonly getTerrainGroup: () => THREE.Group | null
   /** 元数据包围盒查询函数 */
   private readonly getFallbackBounds: () => THREE.Box3
+  /** 飞行到目标点的回调 */
+  private readonly flyTo?: (target: THREE.Vector3) => void
+  /** 延迟重新贴地的回调 */
+  private readonly onScheduleGrounding?: (delay: number) => void
   /** 射线投射器：用于将经纬度点位精确贴合到地形表面 */
   private readonly raycaster = new THREE.Raycaster()
   /** 纹理加载器：用于异步加载点位精灵图标 */
@@ -68,6 +76,8 @@ export class PointMarkerRenderer {
     this.markerRoot = options.markerRoot
     this.getTerrainGroup = options.getTerrainGroup
     this.getFallbackBounds = options.getFallbackBounds
+    this.flyTo = options.flyTo
+    this.onScheduleGrounding = options.onScheduleGrounding
   }
 
   /**
@@ -151,6 +161,18 @@ export class PointMarkerRenderer {
     this.activeCoordinate = { longitude, latitude, height }
 
     return pointPosition.clone()
+  }
+
+  /**
+   * 渲染经纬度定位点并飞行到该点
+   *
+   * 组合调用 render() + flyTo + scheduleGrounding，
+   * 对外提供一步到位的“渲染 + 飞行 + 后续贴地”体验。
+   */
+  async renderLonLatPoint(longitude: number, latitude: number, height?: number): Promise<void> {
+    const pointPosition = await this.render(longitude, latitude, height)
+    this.flyTo?.(pointPosition)
+    this.onScheduleGrounding?.(1000)
   }
 
   /**

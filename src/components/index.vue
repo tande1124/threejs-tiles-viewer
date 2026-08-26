@@ -33,10 +33,7 @@
     <Transition name="slide-panel">
       <PointLocatorForm
         v-if="showPointForm"
-        :submitting="isSubmittingPoint"
-        :error="pointError"
-        @submit="handlePointSubmit"
-        @clear="clearPoint"
+        :renderer="controller?.getPointMarkerRenderer() ?? null"
       />
     </Transition>
 
@@ -53,9 +50,7 @@ import { defineComponent, markRaw } from 'vue'
 import { TilesViewerController } from '@/utils/TilesViewerController'
 import { getDefaultSceneConfig } from '@/utils/common/tileset'
 import type { GltfPickInfo } from '@/utils/GltfModelLoader'
-import PointLocatorForm, {
-  type PointSubmitPayload,
-} from '@/components/PointLocatorForm.vue'
+import PointLocatorForm from '@/components/PointLocatorForm.vue'
 import DetailPop from '@/components/DetailPop.vue'
 
 /**
@@ -91,8 +86,6 @@ export default defineComponent({
     return {
       controller: null as TilesViewerController | null,
       defaultSceneConfig: getDefaultSceneConfig(),
-      pointError: '',
-      isSubmittingPoint: false,
       /** 点位定位表单是否展开 */
       showPointForm: false,
       /** 点击 GLB 部件拾取的详情（null 表示未选中/弹窗关闭） */
@@ -173,36 +166,7 @@ export default defineComponent({
     /** 直接加载默认 GLTF 模型到场景，并按地理配准参数自动定位 */
     async loadDefaultGltf() {
       if (!this.controller) return
-      await this.controller.loadGltf('./data/gltf/jfs-bim.glb', { geo: DEFAULT_GLTF_GEO })
-    },
-
-    /** 处理表单提交的经纬度，渲染点位并自动飞行定位 */
-    async handlePointSubmit(payload: PointSubmitPayload) {
-      if (!this.controller) {
-        this.pointError = '场景控制器尚未初始化。'
-        return
-      }
-
-      this.pointError = ''
-      this.isSubmittingPoint = true
-
-      try {
-        await this.controller.renderLonLatPoint(
-          payload.longitude,
-          payload.latitude,
-          payload.height,
-        )
-      } catch (error) {
-        this.pointError =
-          error instanceof Error ? error.message : '点位渲染失败，请稍后重试。'
-      } finally {
-        this.isSubmittingPoint = false
-      }
-    },
-
-    clearPoint() {
-      this.pointError = ''
-      this.controller?.clearLonLatPoint()
+      await this.controller.getGltfModelLoader().loadGltf('./data/gltf/jfs-bim.glb', { geo: DEFAULT_GLTF_GEO })
     },
 
     /** 从控制器刷新图层列表（控制器是显隐状态的唯一来源） */

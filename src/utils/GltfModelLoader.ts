@@ -37,6 +37,15 @@ export interface GltfPickInfo {
   model: THREE.Group
 }
 
+/** 查看器回调配置（由 TilesViewerController 构造时注入） */
+export interface ViewerCallbacks {
+  /** 点击 GLB 模型部件时的回调（info 为 null 表示点击未命中模型，可关闭弹窗） */
+  onGltfPick?: (
+    info: GltfPickInfo | null,
+    position: { x: number; y: number } | null,
+  ) => void
+}
+
 /** GltfModelLoader 的依赖注入 */
 export interface GltfModelLoaderDeps {
   /** 模型挂载的目标场景 */
@@ -59,6 +68,8 @@ export interface GltfModelLoaderDeps {
     info: GltfPickInfo | null,
     position: { x: number; y: number } | null,
   ) => void
+  /** 可选：模型加载完成后请求控制器触发相机自动聚焦 */
+  onRequestFitCamera?: () => void
 }
 
 /**
@@ -153,6 +164,33 @@ export class GltfModelLoader {
     }
 
     this.root.add(model)
+    return model
+  }
+
+  /**
+   * 加载 GLTF/GLB 模型的高层封装
+   *
+   * 在 load() 基础上补充双相机场景的默认行为：
+   * - 默认 layer=1（内相机层）
+   * - 提供 geo 配准时自动关闭 center（由地理矩阵定位）
+   * - fitCamera !== false 时通知控制器触发相机自动聚焦
+   *
+   * @param url - 模型资源地址
+   * @param options.fitCamera - 加载后是否触发相机聚焦（默认 true）
+   */
+  async loadGltf(
+    url: string,
+    options: GltfLoadOptions & { fitCamera?: boolean } = {},
+  ): Promise<THREE.Group> {
+    const loadOptions: GltfLoadOptions = { layer: 1, ...options }
+    const model = options.geo
+      ? await this.load(url, { ...loadOptions, center: false })
+      : await this.load(url, loadOptions)
+
+    if (options.fitCamera !== false) {
+      this.deps.onRequestFitCamera?.()
+    }
+
     return model
   }
 
