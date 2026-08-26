@@ -133,7 +133,7 @@ export default defineComponent({
           onGltfPick: this.handleGltfPick,
         }),
       )
-      this.controller.mount(viewerRoot)
+      await this.controller.mount(viewerRoot)
 
       try {
         await this.loadDefaultScene()

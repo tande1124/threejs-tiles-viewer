@@ -19,8 +19,6 @@ interface FlyAnimationState {
 
 /** CameraManager 回调配置 */
 export interface CameraManagerCallbacks {
-  /** 首次相机聚焦完成时回调（用于画布淡入等） */
-  onFirstFitDone?: () => void
   /** 请求重新贴地点位（地形加载后刷新点位高程） */
   onGrounding?: () => void
 }
@@ -36,7 +34,7 @@ export interface CameraManagerCallbacks {
  * 用法：
  * ```ts
  * const cam = new CameraManager(domElement, {
- *   onFirstFitDone: () => domElement.style.opacity = '1',
+ *   onGrounding: () => pointMarkerRenderer.refreshGrounding(),
  * })
  * scene.add(cam.camera) // 相机本身无需加入场景，但可用于 TilesRenderer.setCamera
  * cam.resize(width, height)
@@ -51,8 +49,6 @@ export class CameraManager {
 
   /** 用户手动操作后禁止后续自动聚焦覆盖视角 */
   private hasSettledView = false
-  /** 首次聚焦是否完成 */
-  private firstFitDone = false
   private fitTimerId = 0
   private groundingTimerId = 0
 
@@ -127,12 +123,6 @@ export class CameraManager {
     this.controls.maxDistance = Math.max(fitDistance * ZOOM_LIMITS.maxDistanceFactor, safeDimension)
     this.controls.target.copy(center)
     this.controls.update()
-
-    // 首次聚焦完成回调（画布淡入等）
-    if (!this.firstFitDone) {
-      this.firstFitDone = true
-      this.callbacks.onFirstFitDone?.()
-    }
 
     return true
   }

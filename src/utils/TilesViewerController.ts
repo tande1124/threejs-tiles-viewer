@@ -71,9 +71,6 @@ export class TilesViewerController {
 
     // 相机管理器：统一管理相机、轨道控制、飞行、聚焦
     this.cameraManager = new CameraManager(this.renderer.domElement, {
-      onFirstFitDone: () => {
-        this.renderer.domElement.style.opacity = '1'
-      },
       onGrounding: () => {
         this.pointMarkerRenderer?.refreshGrounding()
       },
@@ -92,10 +89,6 @@ export class TilesViewerController {
       whenTerrainReady: () => this.whenTerrainReady(),
       onPick: (info, position) => {
         callbacks.onGltfPick?.(info, position)
-      },
-      onRequestFitCamera: () => {
-        this.cameraManager.markUnsettled()
-        this.scheduleCameraFit()
       },
     })
 
@@ -133,15 +126,15 @@ export class TilesViewerController {
     this.renderer.toneMappingExposure = 1
     this.renderer.autoClear = false // 双透模式手动控制清屏
 
-    // 画布初始隐藏，等首次相机聚焦就位后淡入，避免看到中间状态
+    // 画布初始透明，等环境配置就绪后淡入，避免黑屏
     this.renderer.domElement.style.opacity = '0'
     this.renderer.domElement.style.transition = 'opacity 0.6s ease'
   }
 
   // ========== 公共方法 ==========
 
-  /** 挂载 canvas 到容器，启动渲染循环 */
-  mount(container: HTMLElement): void {
+  /** 挂载 canvas 到容器，构建场景环境（天空+光照），启动渲染循环 */
+  async mount(container: HTMLElement): Promise<void> {
     this.container = container
     this.container.innerHTML = ''
     this.container.appendChild(this.renderer.domElement)
@@ -152,6 +145,13 @@ export class TilesViewerController {
 
     this.resizeObserver.observe(container)
     this.handleResize()
+
+    // 先构建场景环境（天空、光照），避免黑屏
+    await this.applyEnvConfig()
+
+    // 环境就绪，画布淡入
+    this.renderer.domElement.style.opacity = '1'
+
     this.startLoop()
 
       ; (window as unknown as { __tilesViewer?: TilesViewerController }).__tilesViewer = this
@@ -166,11 +166,6 @@ export class TilesViewerController {
     this.pointMarkerRenderer.clear()
     this.sceneBounds.makeEmpty()
 
-    await (this.renderer as THREE.WebGLRenderer & { init?: () => Promise<void> }).init?.()
-
-    // 应用环境配置（天空、光照、渲染参数）
-    await this.applyEnvConfig()
-
     // ---- 加载 3D Tiles 作为外壳（Layer 0）----
     const source = sources.find((item) => item.url)
     if (!source) {
@@ -184,15 +179,10 @@ export class TilesViewerController {
     this.tilesRenderer.setCamera(this.cameraManager.camera)
     this.tilesRenderer.setResolutionFromRenderer(this.cameraManager.camera, this.renderer)
 
-    // 降低 SSE 阈值（默认 16px → 4px），让 TilesRenderer 加载更高层级的细节瓦片
-    this.tilesRenderer.errorTarget = 0
-    // 提高瓦片解析并发数（默认 5 → 10），加速高清瓦片加载
-    this.tilesRenderer.parseQueue.maxJobs = 10
-
-    // 坐标 recenter（大坐标 ECEF 场景归到原点附近）
+    // 坐标 recenter（ECEF 大坐标场景归到原点附近，并自动对齐地表法线方向）
     this.tilesRenderer.registerPlugin(new ReorientationPlugin({ up: '+z', recenter: true }))
 
-    // 所有瓦片网格分配到 Layer 0（外壳层），仅外相机可见
+    // 瓦片网格分配到 Layer 0（外壳层），仅外相机可见（双透视渲染需要）
     this.tilesRenderer.addEventListener('load-model', ({ scene }: { scene: THREE.Object3D }) => {
       scene.traverse((obj: THREE.Object3D) => {
         if ((obj as THREE.Mesh).isMesh) {
@@ -201,32 +191,53 @@ export class TilesViewerController {
       })
     })
 
-    // tileset 加载完成后，ReorientationPlugin 已把瓦片集居中到原点并调整为 +Y 上，
-    // 这里只记录场景范围并聚焦相机（v0.5.1 事件名为 load-root-tileset）
+    // 适配大场景 + 错误处理
+    let isFirstTileSet = true
     const boundingSphere = new THREE.Sphere()
-    this.tilesRenderer.addEventListener('load-root-tileset', () => {
+
+    this.tilesRenderer.addEventListener('load-tile-set', () => {
       const renderer = this.tilesRenderer
       if (!renderer) return
+
       if (renderer.getBoundingSphere(boundingSphere)) {
-        const center = boundingSphere.center.clone().applyMatrix4(renderer.group.matrixWorld)
+        const radius = boundingSphere.radius
+
+        // ReorientationPlugin 已完成居中 + 旋转，计算场景范围
+        const center = new THREE.Vector3(0, 0, 0)
         this.sceneBounds.setFromCenterAndSize(
           center,
-          new THREE.Vector3(
-            boundingSphere.radius * 2,
-            boundingSphere.radius * 2,
-            boundingSphere.radius * 2,
-          ),
+          new THREE.Vector3(radius * 2, radius * 2, radius * 2),
         )
+
+        // 调整相机 near/far 以适应大场景（参照 demo: near=radius*0.0001, far=radius*10）
+        const cam = this.cameraManager.camera
+        cam.near = Math.max(radius * 0.0001, 0.01)
+        cam.far = radius * 10
+        cam.updateProjectionMatrix()
+
+        // 动态设置缩放范围
+        this.cameraManager.controls.minDistance = radius * 0.01
+        this.cameraManager.controls.maxDistance = radius * 3
+        this.cameraManager.controls.update()
       }
+
       this.tilesetReady = true
 
-      // 立即用 bounding sphere 完整范围聚焦相机（不等瓦片逐步加载）
+      // 只在首次 tileset 加载完成时自动定位相机，避免缩放后被重置
+      if (!isFirstTileSet) return
+      isFirstTileSet = false
+
       if (!this.cameraManager.isViewSettled() && !this.sceneBounds.isEmpty()) {
         const box = new THREE.Box3().copy(this.sceneBounds)
         const gltfBox = new THREE.Box3().setFromObject(this.gltfModelLoader.root)
         if (!gltfBox.isEmpty()) box.union(gltfBox)
         this.cameraManager.fitToBox(box)
       }
+    })
+
+    // 瓦片加载错误处理
+    this.tilesRenderer.addEventListener('load-tile-error', (e: unknown) => {
+      console.warn('[TilesViewerController] 瓦片加载错误:', e)
     })
 
     this.tilesetRoot.add(this.tilesRenderer.group)
@@ -473,25 +484,6 @@ export class TilesViewerController {
       this.camInner.updateProjectionMatrix()
       this.rtInner.setSize(width, height)
     }
-  }
-
-  // ========== 相机聚焦 ==========
-
-  /** 延迟触发相机自动聚焦（防抖 160ms），用于 GLTF 加载等后续场景变更 */
-  private scheduleCameraFit(): void {
-    this.cameraManager.scheduleFit(() => {
-      const box = new THREE.Box3()
-      if (!this.sceneBounds.isEmpty()) {
-        box.copy(this.sceneBounds)
-        const gltfBox = new THREE.Box3().setFromObject(this.gltfModelLoader.root)
-        if (!gltfBox.isEmpty()) box.union(gltfBox)
-      } else {
-        this.tilesetRoot.updateMatrixWorld(true)
-        box.setFromObject(this.tilesetRoot)
-        box.union(new THREE.Box3().setFromObject(this.gltfModelLoader.root))
-      }
-      return box
-    })
   }
 
   /** 获取相机管理器实例（供外部读取相机、控制器等状态） */
