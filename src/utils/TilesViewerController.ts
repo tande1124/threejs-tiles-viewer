@@ -2,11 +2,10 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { DRACOLoader, DRACO_GLTF_CONFIG } from 'three/addons/loaders/DRACOLoader.js'
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js'
-import { EXRLoader } from 'three/addons/loaders/EXRLoader.js'
 import { TilesRenderer } from '3d-tiles-renderer'
 import { ReorientationPlugin } from '3d-tiles-renderer/three/plugins'
-import { Sky } from 'three/addons/objects/Sky.js'
 import { disposeObject3D } from '@/utils/common/three-dispose'
+import { EnvironmentManager } from '@/utils/common/environment'
 import { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
 import {
   GltfModelLoader,
@@ -14,18 +13,6 @@ import {
   type ViewerCallbacks,
 } from '@/utils/GltfModelLoader'
 import type { SceneSourceKind, TilesetSourceConfig } from '@/utils/common/tileset'
-
-// ========== 环境配置类型 ==========
-
-interface EnvConfig {
-  version: number
-  sky: { enabled: boolean; turbidity: number; rayleigh: number; mieCoefficient: number; mieDirectionalG: number }
-  sun: { elevation: number; azimuth: number; syncSunToLight: boolean }
-  directionalLight: { intensity: number; color: string; yaw: number; pitch: number }
-  shadow: { enabled: boolean; resolution: number; range: number; offsetX: number; offsetY: number; bias: number }
-  environment: { hdrPath: string; envIntensity: number; bgIntensity: number; exposure: number }
-  bloom: { enabled: boolean; strength: number; radius: number; threshold: number }
-}
 
 // ========== 配置常量 ==========
 
@@ -60,11 +47,8 @@ export class TilesViewerController {
   private readonly resizeObserver = new ResizeObserver(() => this.handleResize())
   private pointMarkerRenderer: PointMarkerRenderer
 
-  // ---- 天空与环境 ----
-  private readonly sky: Sky
-  private readonly sunPosition = new THREE.Vector3()
-  /** HDR 环境贴图（studio.exr），为 PBR 材质提供环境反射与背景 */
-  private hdrTexture: THREE.Texture | null = null
+  // ---- 环境管理 ----
+  private environment: EnvironmentManager
 
   // ---- 3D Tiles 状态 ----
   private tilesRenderer: TilesRenderer | null = null
@@ -101,20 +85,9 @@ export class TilesViewerController {
   constructor(callbacks: ViewerCallbacks = {}) {
     this.dracoLoader.setDecoderPath(DRACO_GLTF_CONFIG)
 
-    // 天空：Preetham 物理大气散射模型
-    this.sky = new Sky()
-    this.sky.scale.setScalar(45000)
-    this.scene.add(this.sky)
-    // 默认天空参数（后续由 applyEnvConfig 覆盖）
-    const skyUniforms = this.sky.material.uniforms
-    skyUniforms['turbidity'].value = 10
-    skyUniforms['rayleigh'].value = 2
-    skyUniforms['mieCoefficient'].value = 0.005
-    skyUniforms['mieDirectionalG'].value = 0.8
-    this.sunPosition.set(0, 1, 0)
-    skyUniforms['sunPosition'].value.copy(this.sunPosition)
-    // PMREM 环境贴图：从天空烘焙，为 PBR 材质提供环境反射
-    this.bakeSkyEnvMap()
+    // 环境管理器：统一管理天空、光照、阴影、HDR、色调映射
+    this.environment = new EnvironmentManager(this.scene, this.renderer)
+    this.scene.add(this.environment.getSky())
 
     this.tilesetRoot.name = 'tileset-root'
     this.markerRoot.name = 'marker-root'
@@ -230,11 +203,7 @@ export class TilesViewerController {
     this.ktx2Loader.detectSupport(this.renderer)
 
     // 应用环境配置（天空、光照、渲染参数）
-    try {
-      await this.applyEnvConfig()
-    } catch (e) {
-      console.warn('[loadScene] 环境配置加载失败，使用默认参数。', e)
-    }
+    await this.applyEnvConfig()
 
     // ---- 加载 3D Tiles 作为外壳（Layer 0）----
     const source = sources.find((item) => item.url)
@@ -343,168 +312,18 @@ export class TilesViewerController {
 
   // ========== 环境配置 ==========
 
-  /** 应用环境配置：天空、HDR、光照、阴影、渲染参数（对齐 environment.js importConfig） */
+  /** 加载 env-config.json 并应用全部环境配置（天空、光照、阴影、渲染参数） */
   async applyEnvConfig(): Promise<void> {
-    const cfg = await this.loadEnvConfig()
-
-    // ---- 天空参数 ----
-    const skyUniforms = this.sky.material.uniforms
-    skyUniforms['turbidity'].value = cfg.sky.turbidity
-    skyUniforms['rayleigh'].value = cfg.sky.rayleigh
-    skyUniforms['mieCoefficient'].value = cfg.sky.mieCoefficient
-    skyUniforms['mieDirectionalG'].value = cfg.sky.mieDirectionalG
-
-    // ---- 太阳位置 ----
-    const phi = THREE.MathUtils.degToRad(90 - cfg.sun.elevation)
-    const theta = THREE.MathUtils.degToRad(cfg.sun.azimuth)
-    this.sunPosition.setFromSphericalCoords(1, phi, theta)
-    skyUniforms['sunPosition'].value.copy(this.sunPosition)
-
-    // ---- 色调映射与曝光 ----
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = cfg.environment.exposure
-
-    // ---- 从天空烘焙 PMREM 环境贴图 ----
-    this.bakeSkyEnvMap()
-
-
-
-
-    // ---- 天空可见性（对齐 applySky）----
-    this.sky.visible = cfg.sky.enabled
-
-    if (!cfg.sky.enabled) {
-      // ---- 加载 HDR 环境贴图（studio.exr）----
-      await this.loadHdrEnvironment(cfg.environment.hdrPath)
+    try {
+      await this.environment.applyFromUrl('./config/env-config.json')
+    } catch (e) {
+      console.warn('[loadScene] 环境配置加载失败，使用默认参数。', e)
     }
-
-
-    // ---- 环境强度 & 背景（对齐 applyAllParams 中 envInt / bgInt 逻辑）----
-    const envInt = cfg.environment.envIntensity
-    if (envInt > 0 && this.hdrTexture) {
-      this.scene.environment = this.hdrTexture
-      this.scene.environmentIntensity = envInt
-    } else if (envInt > 0) {
-      this.scene.environment = null
-      this.scene.environmentIntensity = envInt
-    } else {
-      // envInt = 0 → 保留天空 PMREM 烘焙结果作为环境贴图
-      this.scene.environmentIntensity = 0
-    }
-
-    const bgInt = cfg.environment.bgIntensity
-    if (bgInt > 0 && this.hdrTexture) {
-      this.scene.background = this.hdrTexture
-      this.scene.backgroundIntensity = bgInt
-    } else if (bgInt > 0) {
-      this.scene.background = new THREE.Color(0x000000)
-      this.scene.backgroundIntensity = bgInt
-    } else {
-      this.scene.background = new THREE.Color(0x1a1a2e)
-      this.scene.backgroundIntensity = 0
-    }
-
-    // ---- 光照 ----
-    // 移除旧灯光（保留 tileset-root 和 marker-root）
-    const toRemove: THREE.Object3D[] = []
-    this.scene.traverse((obj) => {
-      if ((obj as THREE.Light).isLight) toRemove.push(obj)
-    })
-    toRemove.forEach((obj) => {
-      obj.parent?.remove(obj)
-    })
-
-    // 主方向光（从配置读取方向 / 强度 / 颜色）
-    const mainLight = new THREE.DirectionalLight(cfg.directionalLight.color, cfg.directionalLight.intensity)
-    const yaw = THREE.MathUtils.degToRad(cfg.directionalLight.yaw)
-    const pitch = THREE.MathUtils.degToRad(cfg.directionalLight.pitch)
-    mainLight.position.setFromSphericalCoords(200, Math.PI / 2 - pitch, yaw)
-    mainLight.layers.enableAll()
-    this.scene.add(mainLight)
-
-    // 太阳同步：方向光跟随太阳方向
-    if (cfg.sun.syncSunToLight) {
-      mainLight.position.copy(this.sunPosition).multiplyScalar(200)
-    }
-
-    // ---- 阴影（对齐 applyShadowToggle）----
-    if (cfg.shadow.enabled) {
-      mainLight.castShadow = true
-      this.renderer.shadowMap.enabled = true
-      mainLight.shadow.mapSize.set(cfg.shadow.resolution, cfg.shadow.resolution)
-      mainLight.shadow.camera.left = -cfg.shadow.range + cfg.shadow.offsetX
-      mainLight.shadow.camera.right = cfg.shadow.range + cfg.shadow.offsetX
-      mainLight.shadow.camera.top = cfg.shadow.range + cfg.shadow.offsetY
-      mainLight.shadow.camera.bottom = -cfg.shadow.range + cfg.shadow.offsetY
-      mainLight.shadow.bias = cfg.shadow.bias
-      mainLight.shadow.camera.updateProjectionMatrix()
-    }
-
-    // 半球光（环境补光）
-    const hemiLight = new THREE.HemisphereLight('#dbeafe', '#020617', 0.6)
-    hemiLight.position.set(0, 1, 0)
-    hemiLight.layers.enableAll()
-    this.scene.add(hemiLight)
-
-    // 补光（对侧柔光）
-    const fillLight = new THREE.DirectionalLight('#93c5fd', 0.4)
-    fillLight.position.set(-100, 60, -80)
-    fillLight.layers.enableAll()
-    this.scene.add(fillLight)
   }
 
-  /** 加载 HDR 环境贴图（EXR 格式），为 PBR 材质提供环境反射与背景 */
-  private loadHdrEnvironment(path: string): Promise<void> {
-    if (!path) return Promise.resolve()
-    return new Promise<void>((resolve) => {
-      new EXRLoader().load(
-        path,
-        (tex) => {
-          tex.mapping = THREE.EquirectangularReflectionMapping
-          this.hdrTexture = tex
-          resolve()
-        },
-        undefined,
-        (err) => {
-          console.warn('[applyEnvConfig] HDR 加载失败', err)
-          resolve()
-        },
-      )
-    })
-  }
-
-  /** 从 env-config.json 加载环境配置 */
-  private async loadEnvConfig(): Promise<EnvConfig> {
-    const res = await fetch('./config/env-config.json')
-    if (!res.ok) {
-      throw new Error(`环境配置加载失败: ${res.status} ${res.statusText}`)
-    }
-    return res.json() as Promise<EnvConfig>
-  }
-
-
-  /** 从当前天空烘焙 PMREM 环境贴图，为 PBR 材质提供环境反射 */
-  private bakeSkyEnvMap(): void {
-    const pmremGenerator = new THREE.PMREMGenerator(this.renderer)
-    pmremGenerator.compileEquirectangularShader()
-
-    const skyScene = new THREE.Scene()
-    const skyCopy = new Sky()
-    skyCopy.material.uniforms['turbidity'].value = this.sky.material.uniforms['turbidity'].value
-    skyCopy.material.uniforms['rayleigh'].value = this.sky.material.uniforms['rayleigh'].value
-    skyCopy.material.uniforms['mieCoefficient'].value = this.sky.material.uniforms['mieCoefficient'].value
-    skyCopy.material.uniforms['mieDirectionalG'].value = this.sky.material.uniforms['mieDirectionalG'].value
-    skyCopy.material.uniforms['sunPosition'].value.copy(this.sunPosition)
-    skyScene.add(skyCopy)
-
-    const envMap = pmremGenerator.fromScene(skyScene).texture
-
-    if (this.scene.environment) {
-      this.scene.environment.dispose()
-    }
-    this.scene.environment = envMap
-
-    pmremGenerator.dispose()
+  /** 获取环境管理器实例（供外部读取天空、光照等状态） */
+  getEnvironment(): EnvironmentManager {
+    return this.environment
   }
 
   // ========== 相机飞行 ==========
@@ -565,14 +384,7 @@ export class TilesViewerController {
     this.controls.dispose()
     this.ktx2Loader.dispose()
     this.dracoLoader.dispose()
-    if (this.scene.environment) {
-      this.scene.environment.dispose()
-      this.scene.environment = null
-    }
-    if (this.hdrTexture) {
-      this.hdrTexture.dispose()
-      this.hdrTexture = null
-    }
+    this.environment.dispose()
     this.rtInner.dispose()
 
     disposeObject3D(this.scene)
