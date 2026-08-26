@@ -49,7 +49,7 @@
 import { defineComponent, markRaw } from 'vue'
 import { TilesViewerController } from '@/utils/TilesViewerController'
 import { getDefaultSceneConfig } from '@/utils/common/tileset'
-import { MaterialConfigurator } from '@/utils/common/material-config'
+import { MaterialConfigurator } from '@/utils/common/material'
 import type { GltfPickInfo } from '@/utils/GltfModelLoader'
 import PointLocatorForm from '@/components/PointLocatorForm.vue'
 import DetailPop from '@/components/DetailPop.vue'
@@ -173,7 +173,7 @@ export default defineComponent({
       // 材质配置：加载 material-state.json 并按 meshName 覆盖材质
       const matCfg = new MaterialConfigurator()
       const { hdrMeta, appliedCount } = await matCfg.applyFromUrl(
-        './config/material-state.json',
+        './config/material-config.json',
         model,
         'test',
       )
