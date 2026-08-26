@@ -49,6 +49,7 @@
 import { defineComponent, markRaw } from 'vue'
 import { TilesViewerController } from '@/utils/TilesViewerController'
 import { getDefaultSceneConfig } from '@/utils/common/tileset'
+import { MaterialConfigurator } from '@/utils/common/material-config'
 import type { GltfPickInfo } from '@/utils/GltfModelLoader'
 import PointLocatorForm from '@/components/PointLocatorForm.vue'
 import DetailPop from '@/components/DetailPop.vue'
@@ -166,7 +167,17 @@ export default defineComponent({
     /** 直接加载默认 GLTF 模型到场景，并按地理配准参数自动定位 */
     async loadDefaultGltf() {
       if (!this.controller) return
-      await this.controller.getGltfModelLoader().loadGltf('./data/gltf/jfs-bim.glb', { geo: DEFAULT_GLTF_GEO })
+      const loader = this.controller.getGltfModelLoader()
+      const model = await loader.loadGltf('./data/gltf/jfs-bim.glb', { geo: DEFAULT_GLTF_GEO })
+
+      // 材质配置：加载 material-state.json 并按 meshName 覆盖材质
+      const matCfg = new MaterialConfigurator()
+      const { hdrMeta, appliedCount } = await matCfg.applyFromUrl(
+        './config/material-state.json',
+        model,
+        'test',
+      )
+      console.log(`[材质配置] 已应用 ${appliedCount} 个网格材质`, hdrMeta ? `| HDR: envInt=${hdrMeta.envInt}, bgInt=${hdrMeta.bgInt}, exposure=${hdrMeta.exposure}` : '')
     },
 
     /** 从控制器刷新图层列表（控制器是显隐状态的唯一来源） */
