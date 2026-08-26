@@ -1,7 +1,5 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
-import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
-import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js'
 import { disposeObject3D } from '@/utils/common/three-dispose'
 import {
   calibrateGeoReferenceFromAnchor,
@@ -52,10 +50,6 @@ export interface GltfModelLoaderDeps {
   scene: THREE.Scene
   /** WebGL 渲染器（用于获取最大各向异性等 GPU 能力） */
   renderer?: THREE.WebGLRenderer
-  /** 复用的 DRACO 解压加载器 */
-  dracoLoader: DRACOLoader
-  /** 复用的 KTX2 纹理加载器 */
-  ktx2Loader: KTX2Loader
   /** 可选：获取 ECEF → 场景坐标的变换矩阵（地理配准用） */
   getEcefToSceneTransform?: () => THREE.Matrix4 | null
   /** 可选：等待地形瓦片集就绪（地理配准用） */
@@ -76,7 +70,7 @@ export interface GltfModelLoaderDeps {
  * GLTF/GLB 模型加载器。
  *
  * 负责把外部 GLB/GLTF 模型直接加载进场景：
- * 创建 GLTFLoader 并接入 DRACO/KTX2 解压能力、可选居中到原点，
+ * 创建 GLTFLoader、可选居中到原点，
  * 所有模型统一挂到 root 容器组下（root 已在构造函数中加入 scene）。
  * 同时提供点击拾取能力：enablePicking 后点击 GLB 部件会通过 deps.onPick
  * 回调该部件的位置/名称等详情，未命中模型时回调 null。
@@ -129,8 +123,6 @@ export class GltfModelLoader {
     this.deps.scene.add(this.root)
 
     this.loader = new GLTFLoader()
-    this.loader.setDRACOLoader(this.deps.dracoLoader)
-    this.loader.setKTX2Loader(this.deps.ktx2Loader)
     // 射线拾取启用所有图层，确保 Layer 1（GLB 内部层）的网格也能被点击命中
     // （双相机模式下 GLB 网格被设到 Layer 1，Raycaster 默认只检测 Layer 0）
     this.raycaster.layers.enableAll()

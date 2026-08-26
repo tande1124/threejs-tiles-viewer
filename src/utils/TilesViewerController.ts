@@ -1,7 +1,5 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { DRACOLoader, DRACO_GLTF_CONFIG } from 'three/addons/loaders/DRACOLoader.js'
-import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js'
 import { TilesRenderer } from '3d-tiles-renderer'
 import { ReorientationPlugin } from '3d-tiles-renderer/three/plugins'
 import { disposeObject3D } from '@/utils/common/three-dispose'
@@ -42,8 +40,6 @@ export class TilesViewerController {
   private readonly tilesetRoot = new THREE.Group()
   private readonly markerRoot = new THREE.Group()
   private readonly gltfModelLoader: GltfModelLoader
-  private readonly dracoLoader = new DRACOLoader()
-  private readonly ktx2Loader = new KTX2Loader()
   private readonly resizeObserver = new ResizeObserver(() => this.handleResize())
   private pointMarkerRenderer: PointMarkerRenderer
 
@@ -83,8 +79,6 @@ export class TilesViewerController {
   }
 
   constructor(callbacks: ViewerCallbacks = {}) {
-    this.dracoLoader.setDecoderPath(DRACO_GLTF_CONFIG)
-
     // 环境管理器：统一管理天空、光照、阴影、HDR、色调映射
     this.environment = new EnvironmentManager(this.scene, this.renderer)
     this.scene.add(this.environment.getSky())
@@ -94,12 +88,10 @@ export class TilesViewerController {
     this.scene.add(this.tilesetRoot)
     this.scene.add(this.markerRoot)
 
-    // GLTF/GLB 模型加载器：维护独立的 gltf-root 容器，复用 DRACO/KTX2 解压
+    // GLTF/GLB 模型加载器：维护独立的 gltf-root 容器
     this.gltfModelLoader = new GltfModelLoader({
       scene: this.scene,
       renderer: this.renderer,
-      dracoLoader: this.dracoLoader,
-      ktx2Loader: this.ktx2Loader,
       getEcefToSceneTransform: () => {
         const group = this.tilesRenderer?.group
         if (!group) return null
@@ -200,7 +192,6 @@ export class TilesViewerController {
     this.groundingTimerId = 0
 
     await (this.renderer as THREE.WebGLRenderer & { init?: () => Promise<void> }).init?.()
-    this.ktx2Loader.detectSupport(this.renderer)
 
     // 应用环境配置（天空、光照、渲染参数）
     await this.applyEnvConfig()
@@ -382,8 +373,6 @@ export class TilesViewerController {
     this.clearTileset()
     this.pointMarkerRenderer.dispose()
     this.controls.dispose()
-    this.ktx2Loader.dispose()
-    this.dracoLoader.dispose()
     this.environment.dispose()
     this.rtInner.dispose()
 
