@@ -1,9 +1,9 @@
 import * as THREE from 'three'
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TilesRenderer } from '3d-tiles-renderer'
 import { ReorientationPlugin } from '3d-tiles-renderer/three/plugins'
 import { disposeObject3D } from '@/utils/common/three-dispose'
 import { EnvironmentManager } from '@/utils/common/environment'
+import { CameraManager } from '@/utils/common/camera'
 import { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
 import {
   GltfModelLoader,
@@ -11,13 +11,6 @@ import {
   type ViewerCallbacks,
 } from '@/utils/GltfModelLoader'
 import type { SceneSourceKind, TilesetSourceConfig } from '@/utils/common/tileset'
-
-// ========== 配置常量 ==========
-
-/** 相机最远缩小倍数（相对初始聚焦距离） */
-const ZOOM_LIMITS = {
-  maxDistanceFactor: 1,
-} as const
 
 // ========== 控制器 ==========
 
@@ -30,18 +23,19 @@ const ZOOM_LIMITS = {
 export class TilesViewerController {
   // ---- Three.js 核心对象 ----
   private readonly scene = new THREE.Scene()
-  private readonly camera = new THREE.PerspectiveCamera(45, 1, 1, 1e7)
   private readonly renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: true,
     powerPreference: 'high-performance',
   })
-  private readonly controls = new OrbitControls(this.camera, this.renderer.domElement)
   private readonly tilesetRoot = new THREE.Group()
   private readonly markerRoot = new THREE.Group()
   private readonly gltfModelLoader: GltfModelLoader
   private readonly resizeObserver = new ResizeObserver(() => this.handleResize())
   private pointMarkerRenderer: PointMarkerRenderer
+
+  // ---- 相机管理 ----
+  private cameraManager!: CameraManager
 
   // ---- 环境管理 ----
   private environment: EnvironmentManager
@@ -61,25 +55,10 @@ export class TilesViewerController {
   private container: HTMLElement | null = null
   /** 场景范围（root 加载后由包围球得出），供相机聚焦与点位贴地回退 */
   private readonly sceneBounds = new THREE.Box3()
-  /** 用户手动操作后禁止后续自动聚焦覆盖视角 */
-  private hasSettledView = false
-  /** 首次相机聚焦是否完成（用于控制画布淡入） */
-  private firstFitDone = false
   private animationFrameId = 0
-  private fitTimerId = 0
-  private groundingTimerId = 0
-  private readonly flyAnimation = {
-    active: false,
-    startTime: 0,
-    duration: 0,
-    fromPosition: new THREE.Vector3(),
-    toPosition: new THREE.Vector3(),
-    fromTarget: new THREE.Vector3(),
-    toTarget: new THREE.Vector3(),
-  }
 
   constructor(callbacks: ViewerCallbacks = {}) {
-    // 环境管理器：统一管理天空、光照、阴影、HDR、色调映射
+    // 环境管理器
     this.environment = new EnvironmentManager(this.scene, this.renderer)
     this.scene.add(this.environment.getSky())
 
@@ -87,6 +66,16 @@ export class TilesViewerController {
     this.markerRoot.name = 'marker-root'
     this.scene.add(this.tilesetRoot)
     this.scene.add(this.markerRoot)
+
+    // 相机管理器：统一管理相机、轨道控制、飞行、聚焦
+    this.cameraManager = new CameraManager(this.renderer.domElement, {
+      onFirstFitDone: () => {
+        this.renderer.domElement.style.opacity = '1'
+      },
+      onGrounding: () => {
+        this.pointMarkerRenderer?.refreshGrounding()
+      },
+    })
 
     // GLTF/GLB 模型加载器：维护独立的 gltf-root 容器
     this.gltfModelLoader = new GltfModelLoader({
@@ -103,14 +92,14 @@ export class TilesViewerController {
         callbacks.onGltfPick?.(info, position)
       },
       onRequestFitCamera: () => {
-        this.hasSettledView = false
+        this.cameraManager.markUnsettled()
         this.scheduleCameraFit()
       },
     })
 
     // ---- 双相机透视基础设施 ----
     // 外相机（Layer 0）看 3D Tiles 外壳，内相机（Layer 1）看 GLB 内部结构
-    this.camera.layers.set(0)
+    this.cameraManager.camera.layers.set(0)
     this.camInner.layers.set(1)
     this.rtInner.texture.colorSpace = THREE.SRGBColorSpace
 
@@ -125,7 +114,7 @@ export class TilesViewerController {
     this.sceneOverlay.add(quad)
 
     // 启用 GLB 部件点击拾取（点击部件回调 onGltfPick，点击空白回调 null）
-    this.gltfModelLoader.enablePicking(this.camera, this.renderer.domElement)
+    this.gltfModelLoader.enablePicking(this.cameraManager.camera, this.renderer.domElement)
 
     this.pointMarkerRenderer = new PointMarkerRenderer({
       tilesetRoot: this.tilesetRoot,
@@ -133,19 +122,7 @@ export class TilesViewerController {
       getTerrainGroup: () => this.findTerrainGroup(),
       getFallbackBounds: () => this.sceneBounds,
       flyTo: (target) => this.flyTo(target),
-      onScheduleGrounding: (delay) => this.schedulePointGrounding(delay),
-    })
-
-    this.camera.position.set(0, 3000, 4000)
-
-    this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.08
-    this.controls.minDistance = 1
-    this.controls.maxDistance = 50000
-    this.controls.target.set(0, 0, 0)
-    // 用户手动操作后禁止后续自动聚焦覆盖视角
-    this.controls.addEventListener('start', () => {
-      this.hasSettledView = true
+      onScheduleGrounding: (delay) => this.cameraManager.scheduleGrounding(delay),
     })
 
     this.renderer.setPixelRatio(this.getPreferredPixelRatio())
@@ -186,10 +163,6 @@ export class TilesViewerController {
 
     this.pointMarkerRenderer.clear()
     this.sceneBounds.makeEmpty()
-    window.clearTimeout(this.fitTimerId)
-    window.clearTimeout(this.groundingTimerId)
-    this.fitTimerId = 0
-    this.groundingTimerId = 0
 
     await (this.renderer as THREE.WebGLRenderer & { init?: () => Promise<void> }).init?.()
 
@@ -206,8 +179,8 @@ export class TilesViewerController {
 
     this.tilesetSource = source
     this.tilesRenderer = new TilesRenderer(source.url)
-    this.tilesRenderer.setCamera(this.camera)
-    this.tilesRenderer.setResolutionFromRenderer(this.camera, this.renderer)
+    this.tilesRenderer.setCamera(this.cameraManager.camera)
+    this.tilesRenderer.setResolutionFromRenderer(this.cameraManager.camera, this.renderer)
 
     // 降低 SSE 阈值（默认 16px → 4px），让 TilesRenderer 加载更高层级的细节瓦片
     this.tilesRenderer.errorTarget = 0
@@ -245,16 +218,12 @@ export class TilesViewerController {
       }
       this.tilesetReady = true
 
-      // 立即用 bounding sphere 完整范围聚焦相机（不等瓦片逐步加载），然后淡入画布
-      if (!this.hasSettledView && !this.sceneBounds.isEmpty()) {
+      // 立即用 bounding sphere 完整范围聚焦相机（不等瓦片逐步加载）
+      if (!this.cameraManager.isViewSettled() && !this.sceneBounds.isEmpty()) {
         const box = new THREE.Box3().copy(this.sceneBounds)
         const gltfBox = new THREE.Box3().setFromObject(this.gltfModelLoader.root)
         if (!gltfBox.isEmpty()) box.union(gltfBox)
-        this.fitCameraToBox(box)
-      }
-      if (!this.firstFitDone) {
-        this.firstFitDone = true
-        this.renderer.domElement.style.opacity = '1'
+        this.cameraManager.fitToBox(box)
       }
     })
 
@@ -273,7 +242,7 @@ export class TilesViewerController {
 
   /** 用 NDC 坐标（-1 ~ 1，原点在画布中心）手动拾取 GLB 部件（调试工具） */
   pickGltfAt(ndcX: number, ndcY: number): GltfPickInfo | null {
-    return this.gltfModelLoader.pick(this.camera, new THREE.Vector2(ndcX, ndcY))
+    return this.gltfModelLoader.pick(this.cameraManager.camera, new THREE.Vector2(ndcX, ndcY))
   }
 
   /** 清除 GLB 部件高亮 */
@@ -321,39 +290,7 @@ export class TilesViewerController {
 
   /** 平滑飞行到目标点，保持当前观察角度 */
   flyTo(target: THREE.Vector3, duration = 900): void {
-    this.hasSettledView = true
-
-    const distance = Math.max(this.pointMarkerRenderer.getMarkerScale() * 12, 120)
-    const direction = new THREE.Vector3()
-    this.camera.getWorldDirection(direction)
-
-    const anim = this.flyAnimation
-    anim.active = true
-    anim.startTime = performance.now()
-    anim.duration = duration
-    anim.fromPosition.copy(this.camera.position)
-    anim.toPosition.copy(target).addScaledVector(direction, -distance)
-    anim.fromTarget.copy(this.controls.target)
-    anim.toTarget.copy(target)
-  }
-
-  /** 每帧推进飞行动画（easeInOutCubic） */
-  private updateFlyAnimation(): void {
-    const anim = this.flyAnimation
-    const elapsed = performance.now() - anim.startTime
-    const t = Math.min(elapsed / anim.duration, 1)
-    const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
-
-    this.camera.position.lerpVectors(anim.fromPosition, anim.toPosition, eased)
-    this.controls.target.lerpVectors(anim.fromTarget, anim.toTarget, eased)
-    this.camera.lookAt(this.controls.target)
-
-    if (t >= 1) {
-      anim.active = false
-      this.camera.position.copy(anim.toPosition)
-      this.controls.target.copy(anim.toTarget)
-      this.controls.update()
-    }
+    this.cameraManager.flyTo(target, this.pointMarkerRenderer.getMarkerScale(), duration)
   }
 
   // ========== 销毁 ==========
@@ -365,14 +302,12 @@ export class TilesViewerController {
       debugWindow.__tilesViewer = null
     }
 
-    window.clearTimeout(this.fitTimerId)
-    window.clearTimeout(this.groundingTimerId)
     cancelAnimationFrame(this.animationFrameId)
     this.resizeObserver.disconnect()
     this.gltfModelLoader.disablePicking()
     this.clearTileset()
     this.pointMarkerRenderer.dispose()
-    this.controls.dispose()
+    this.cameraManager.dispose()
     this.environment.dispose()
     this.rtInner.dispose()
 
@@ -390,20 +325,21 @@ export class TilesViewerController {
     const renderFrame = () => {
       this.animationFrameId = window.requestAnimationFrame(renderFrame)
 
-      if (this.flyAnimation.active) {
-        this.updateFlyAnimation()
+      if (this.cameraManager.tickFlyAnimation()) {
+        // 飞行动画进行中，跳过 controls.update()
       } else {
-        this.controls.update()
+        this.cameraManager.controls.update()
       }
 
+      const cam = this.cameraManager.camera
       // TilesRenderer.update() 需要本帧最新的相机矩阵（LOD/frustum culling 在此完成）
-      this.camera.updateMatrixWorld()
+      cam.updateMatrixWorld()
       if (this.tilesRenderer && this.tilesRenderer.group.visible) {
         this.tilesRenderer.update()
       }
 
       // 内部相机姿态完全复制外部相机（位置/朝向/投影同步）
-      this.camInner.copy(this.camera)
+      this.camInner.copy(cam)
       this.camInner.layers.set(1)
 
       // 临时禁用背景和雾，避免 Three.js 填充 render target
@@ -425,7 +361,7 @@ export class TilesViewerController {
       // 2. 渲染外壳到屏幕（Layer 0 的 3D Tiles + 天空）
       this.renderer.setRenderTarget(null)
       this.renderer.clear(true, true, false)
-      this.renderer.render(this.scene, this.camera)
+      this.renderer.render(this.scene, cam)
 
       // 3. 叠加 GLB（含轮廓）：只清深度、保留外壳颜色
       this.renderer.clearDepth()
@@ -440,7 +376,7 @@ export class TilesViewerController {
   /** 释放并移除当前瓦片渲染器 */
   private clearTileset(): void {
     if (this.tilesRenderer) {
-      this.tilesRenderer.deleteCamera(this.camera)
+      this.tilesRenderer.deleteCamera(this.cameraManager.camera)
       this.tilesetRoot.remove(this.tilesRenderer.group)
       this.tilesRenderer.dispose()
       this.tilesRenderer = null
@@ -489,13 +425,12 @@ export class TilesViewerController {
     const width = Math.max(this.container.clientWidth, 1)
     const height = Math.max(this.container.clientHeight, 1)
 
-    this.camera.aspect = width / height
-    this.camera.updateProjectionMatrix()
+    this.cameraManager.resize(width, height)
     this.renderer.setSize(width, height, false)
     this.renderer.setPixelRatio(this.getPreferredPixelRatio())
 
     // 与 demo 一致：窗口变化时重新同步瓦片 SSE 分辨率
-    this.tilesRenderer?.setResolutionFromRenderer(this.camera, this.renderer)
+    this.tilesRenderer?.setResolutionFromRenderer(this.cameraManager.camera, this.renderer)
 
     // 同步内相机与渲染目标尺寸
     this.camInner.aspect = width / height
@@ -505,23 +440,9 @@ export class TilesViewerController {
 
   // ========== 相机聚焦 ==========
 
-  /** 延迟用最新加载的地形几何体重新贴地点位（防抖） */
-  private schedulePointGrounding(delay = 160): void {
-    window.clearTimeout(this.groundingTimerId)
-    this.groundingTimerId = window.setTimeout(() => {
-      this.groundingTimerId = 0
-      this.pointMarkerRenderer.refreshGrounding()
-    }, delay)
-  }
-
   /** 延迟触发相机自动聚焦（防抖 160ms），用于 GLTF 加载等后续场景变更 */
   private scheduleCameraFit(): void {
-    if (this.hasSettledView) return
-
-    window.clearTimeout(this.fitTimerId)
-    this.fitTimerId = window.setTimeout(() => {
-      if (this.hasSettledView) return
-
+    this.cameraManager.scheduleFit(() => {
       const box = new THREE.Box3()
       if (!this.sceneBounds.isEmpty()) {
         box.copy(this.sceneBounds)
@@ -532,45 +453,13 @@ export class TilesViewerController {
         box.setFromObject(this.tilesetRoot)
         box.union(new THREE.Box3().setFromObject(this.gltfModelLoader.root))
       }
-
-      if (!box.isEmpty()) {
-        this.fitCameraToBox(box)
-      }
-
-      // fallback: load-root-tileset 未触发淡入时补上
-      if (!this.firstFitDone) {
-        this.firstFitDone = true
-        this.renderer.domElement.style.opacity = '1'
-      }
-    }, 160)
+      return box
+    })
   }
 
-  /** 根据包围盒调整相机位置与裁剪面/缩放范围 */
-  private fitCameraToBox(box: THREE.Box3): boolean {
-    if (box.isEmpty()) return false
-
-    const size = box.getSize(new THREE.Vector3())
-    const center = box.getCenter(new THREE.Vector3())
-    const maxDimension = Math.max(size.x, size.y, size.z)
-    const safeDimension = maxDimension > 0 ? maxDimension : 10
-
-    const halfFov = THREE.MathUtils.degToRad(this.camera.fov * 0.5)
-    const distance = safeDimension / (2 * Math.tan(halfFov))
-    const fitDistance = distance * 1.65
-
-    const offset = new THREE.Vector3(1.2, 0.9, 1.4).normalize().multiplyScalar(fitDistance)
-
-    this.camera.position.copy(center).add(offset)
-    this.camera.near = Math.max(safeDimension / 500, 0.1)
-    this.camera.far = Math.max(safeDimension * 50, 5000)
-    this.camera.updateProjectionMatrix()
-
-    this.controls.minDistance = Math.max(safeDimension / 200, 1)
-    this.controls.maxDistance = Math.max(fitDistance * ZOOM_LIMITS.maxDistanceFactor, safeDimension)
-    this.controls.target.copy(center)
-    this.controls.update()
-
-    return true
+  /** 获取相机管理器实例（供外部读取相机、控制器等状态） */
+  getCameraManager(): CameraManager {
+    return this.cameraManager
   }
 
   /** 按真实设备像素比渲染，高分屏上限 2x 保护性能 */
