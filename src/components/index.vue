@@ -15,6 +15,15 @@
           @update:model-value="handleLayerToggle(layer.id, $event)"
         />
       </div>
+      <el-divider style="margin: 10px 0" />
+      <div class="layer-row">
+        <span class="layer-name">双透视渲染</span>
+        <el-switch
+          :model-value="dualPass"
+          size="small"
+          @update:model-value="handleDualPassToggle"
+        />
+      </div>
     </el-card>
 
     <!-- 点位定位浮动按钮 -->
@@ -93,6 +102,8 @@ export default defineComponent({
       pickInfo: null as GltfPickInfo | null,
       /** 3D Tiles 图层列表（含显隐状态） */
       layers: [] as LayerItem[],
+      /** 双相机透视渲染开关 */
+      dualPass: true,
     }
   },
   computed: {
@@ -194,6 +205,13 @@ export default defineComponent({
       const visible = Boolean(value)
       this.controller?.setLayerVisible(id, visible)
       this.refreshLayers()
+    },
+
+    /** 切换双相机透视渲染模式 */
+    handleDualPassToggle(value: string | number | boolean) {
+      const enabled = Boolean(value)
+      this.dualPass = enabled
+      this.controller?.setDualPass(enabled)
     },
 
     /** 三维坐标格式化（控制台调试用） */

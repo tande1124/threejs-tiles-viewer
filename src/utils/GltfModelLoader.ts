@@ -100,6 +100,8 @@ export class GltfModelLoader {
   private readonly clonedMaterials = new Set<THREE.Material>()
   /** 轮廓线容器（克隆网格 + 白色背面材质） */
   private readonly outlineGroup = new THREE.Group()
+  /** 当前 GLB 网格所在图层（双透模式=1，单层模式=0） */
+  private currentLayer = 1
   /** 轮廓线共享材质：白色、反面绘制、略微放大 */
   private readonly outlineMaterial = new THREE.MeshBasicMaterial({
     color: 0xffffff,
@@ -118,7 +120,7 @@ export class GltfModelLoader {
     this.root = new THREE.Group()
     this.root.name = 'gltf-root'
     this.outlineGroup.name = 'outline-group'
-    this.outlineGroup.layers.set(1) // 轮廓线仅内相机(Layer 1)可见
+    this.outlineGroup.layers.set(this.currentLayer) // 轮廓线仅内相机可见
     this.deps.scene.add(this.outlineGroup)
     this.deps.scene.add(this.root)
 
@@ -296,9 +298,24 @@ export class GltfModelLoader {
       clone.matrix.premultiply(scaleMatrix)
       clone.matrix.decompose(clone.position, clone.quaternion, clone.scale)
 
-      clone.layers.set(1)
+      clone.layers.set(this.currentLayer)
       clone.renderOrder = 999
       this.outlineGroup.add(clone)
+    })
+  }
+
+  /**
+   * 设置所有 GLB 网格与轮廓线的图层。
+   * 双透模式传 1（仅内相机可见），单层模式传 0（主相机可见）。
+   */
+  setLayer(layer: number): void {
+    this.currentLayer = layer
+    this.root.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) obj.layers.set(layer)
+    })
+    this.outlineGroup.layers.set(layer)
+    this.outlineGroup.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) obj.layers.set(layer)
     })
   }
 

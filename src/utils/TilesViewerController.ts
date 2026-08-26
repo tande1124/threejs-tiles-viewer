@@ -56,6 +56,8 @@ export class TilesViewerController {
   /** 场景范围（root 加载后由包围球得出），供相机聚焦与点位贴地回退 */
   private readonly sceneBounds = new THREE.Box3()
   private animationFrameId = 0
+  /** 是否启用双相机透视渲染（默认开启：GLB 透明叠加在 3D Tiles 外壳上） */
+  private dualPass = true
 
   constructor(callbacks: ViewerCallbacks = {}) {
     // 环境管理器
@@ -129,7 +131,7 @@ export class TilesViewerController {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.NoToneMapping
     this.renderer.toneMappingExposure = 1
-    this.renderer.autoClear = false // 手动控制清屏，保证三步渲染互不干扰
+    this.renderer.autoClear = false // 双透模式手动控制清屏
 
     // 画布初始隐藏，等首次相机聚焦就位后淡入，避免看到中间状态
     this.renderer.domElement.style.opacity = '0'
@@ -293,6 +295,33 @@ export class TilesViewerController {
     this.cameraManager.flyTo(target, this.pointMarkerRenderer.getMarkerScale(), duration)
   }
 
+  /** 当前是否启用双相机透视渲染 */
+  isDualPass(): boolean {
+    return this.dualPass
+  }
+
+  /**
+   * 切换双相机透视模式。
+   * - ON: GLB 在 Layer 1 由内相机渲染，透明叠加在 3D Tiles 外壳上
+   * - OFF: 所有物体在 Layer 0，单相机单次渲染
+   */
+  setDualPass(enabled: boolean): void {
+    if (this.dualPass === enabled) return
+    this.dualPass = enabled
+
+    if (enabled) {
+      // 切回双透模式
+      this.cameraManager.camera.layers.set(0)
+      this.renderer.autoClear = false
+      this.gltfModelLoader.setLayer(1)
+    } else {
+      // 切到单层模式
+      this.cameraManager.camera.layers.enable(1) // 相机同时看到 Layer 0+1
+      this.renderer.autoClear = true
+      this.gltfModelLoader.setLayer(0)
+    }
+  }
+
   // ========== 销毁 ==========
 
   /** 销毁控制器，释放所有 GPU 资源与 DOM 监听 */
@@ -338,34 +367,40 @@ export class TilesViewerController {
         this.tilesRenderer.update()
       }
 
-      // 内部相机姿态完全复制外部相机（位置/朝向/投影同步）
-      this.camInner.copy(cam)
-      this.camInner.layers.set(1)
+      if (this.dualPass) {
+        // ---- 双相机透视：三步合成 ----
+        // 内部相机姿态完全复制外部相机（位置/朝向/投影同步）
+        this.camInner.copy(cam)
+        this.camInner.layers.set(1)
 
-      // 临时禁用背景和雾，避免 Three.js 填充 render target
-      const savedBackground = this.scene.background
-      const savedFog = this.scene.fog
-      this.scene.background = null
-      this.scene.fog = null
+        // 临时禁用背景和雾，避免 Three.js 填充 render target
+        const savedBackground = this.scene.background
+        const savedFog = this.scene.fog
+        this.scene.background = null
+        this.scene.fog = null
 
-      // 1. 渲染 GLB 到 rtInner（透明背景，轮廓网格已在 Layer 1 自动绘制）
-      this.renderer.setRenderTarget(this.rtInner)
-      this.renderer.setClearColor(0x000000, 0) // alpha=0 → 纹理背景透明
-      this.renderer.clear(true, true, false)
-      this.renderer.render(this.scene, this.camInner)
+        // 1. 渲染 GLB 到 rtInner（透明背景）
+        this.renderer.setRenderTarget(this.rtInner)
+        this.renderer.setClearColor(0x000000, 0) // alpha=0 → 纹理背景透明
+        this.renderer.clear(true, true, false)
+        this.renderer.render(this.scene, this.camInner)
 
-      // 恢复背景和雾效
-      this.scene.background = savedBackground
-      this.scene.fog = savedFog
+        // 恢复背景和雾效
+        this.scene.background = savedBackground
+        this.scene.fog = savedFog
 
-      // 2. 渲染外壳到屏幕（Layer 0 的 3D Tiles + 天空）
-      this.renderer.setRenderTarget(null)
-      this.renderer.clear(true, true, false)
-      this.renderer.render(this.scene, cam)
+        // 2. 渲染外壳到屏幕（Layer 0 的 3D Tiles + 天空）
+        this.renderer.setRenderTarget(null)
+        this.renderer.clear(true, true, false)
+        this.renderer.render(this.scene, cam)
 
-      // 3. 叠加 GLB（含轮廓）：只清深度、保留外壳颜色
-      this.renderer.clearDepth()
-      this.renderer.render(this.sceneOverlay, this.camOrtho)
+        // 3. 叠加 GLB（含轮廓）：只清深度、保留外壳颜色
+        this.renderer.clearDepth()
+        this.renderer.render(this.sceneOverlay, this.camOrtho)
+      } else {
+        // ---- 单层模式：一步渲染 ----
+        this.renderer.render(this.scene, cam)
+      }
     }
 
     renderFrame()
@@ -432,10 +467,12 @@ export class TilesViewerController {
     // 与 demo 一致：窗口变化时重新同步瓦片 SSE 分辨率
     this.tilesRenderer?.setResolutionFromRenderer(this.cameraManager.camera, this.renderer)
 
-    // 同步内相机与渲染目标尺寸
-    this.camInner.aspect = width / height
-    this.camInner.updateProjectionMatrix()
-    this.rtInner.setSize(width, height)
+    // 双透模式下同步内相机与渲染目标尺寸
+    if (this.dualPass) {
+      this.camInner.aspect = width / height
+      this.camInner.updateProjectionMatrix()
+      this.rtInner.setSize(width, height)
+    }
   }
 
   // ========== 相机聚焦 ==========
