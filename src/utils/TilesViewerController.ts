@@ -76,7 +76,7 @@ export class TilesViewerController {
       },
     })
 
-    // GLTF/GLB 模型加载器：维护独立的 gltf-root 容器
+    // GLTF/GLB 模型加载器：维护独立的 gltf-root 容器组
     this.gltfModelLoader = new GltfModelLoader({
       scene: this.scene,
       renderer: this.renderer,
@@ -89,6 +89,14 @@ export class TilesViewerController {
       whenTerrainReady: () => this.whenTerrainReady(),
       onPick: (info, position) => {
         callbacks.onGltfPick?.(info, position)
+      },
+      onRequestFitCamera: () => {
+        // 无 3D Tiles 时，GLB 加载完自动聚焦到模型上
+        if (this.tilesetReady) return
+        const box = new THREE.Box3().setFromObject(this.gltfModelLoader.root)
+        if (!box.isEmpty()) {
+          this.cameraManager.fitToBox(box)
+        }
       },
     })
 

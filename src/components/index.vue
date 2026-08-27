@@ -135,13 +135,18 @@ export default defineComponent({
       )
       await this.controller.mount(viewerRoot)
 
-      try {
-        await this.loadDefaultScene()
-        this.refreshLayers()
-      } catch (error) {
-        console.error('默认 3DTiles 场景加载失败。', error)
+      // 加载 3D Tiles 地形（无数据源或加载失败时跳过，不影响 GLB 加载）
+      const hasTiles = this.defaultSceneConfig.sources.some((s) => s.url)
+      if (hasTiles) {
+        try {
+          await this.loadDefaultScene()
+        } catch (error) {
+          console.warn('默认 3DTiles 场景加载失败，将仅加载 GLB 模型。', error)
+        }
       }
+      this.refreshLayers()
 
+      // 加载 GLB 模型（无 3D Tiles 时自动飞行聚焦到模型上）
       try {
         await this.loadDefaultGltf()
       } catch (error) {
