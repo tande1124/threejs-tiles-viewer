@@ -209,7 +209,7 @@ export class TilesViewerController {
           new THREE.Vector3(radius * 2, radius * 2, radius * 2),
         )
 
-        // 调整相机 near/far 以适应大场景（参照 demo: near=radius*0.0001, far=radius*10）
+        // 调整相机 near/far 以适应大场景
         const cam = this.cameraManager.camera
         cam.near = Math.max(radius * 0.0001, 0.01)
         cam.far = radius * 10
@@ -475,7 +475,7 @@ export class TilesViewerController {
     this.renderer.setSize(width, height, false)
     this.renderer.setPixelRatio(this.getPreferredPixelRatio())
 
-    // 与 demo 一致：窗口变化时重新同步瓦片 SSE 分辨率
+    // 窗口变化时重新同步瓦片 SSE 分辨率
     this.tilesRenderer?.setResolutionFromRenderer(this.cameraManager.camera, this.renderer)
 
     // 双透模式下同步内相机与渲染目标尺寸
