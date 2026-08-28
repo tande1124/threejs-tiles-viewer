@@ -1,103 +1,88 @@
 import * as THREE from 'three'
 import { EXRLoader } from 'three/addons/loaders/EXRLoader.js'
-import { Sky } from 'three/addons/objects/Sky.js'
 
-// ========== 环境配置类型 ==========
+// ========== 环境配置类型（env-config.json v2） ==========
 
-/** env-config.json 完整结构 */
 export interface EnvConfig {
   version: number
-  sky: {
-    enabled: boolean
-    turbidity: number
-    rayleigh: number
-    mieCoefficient: number
-    mieDirectionalG: number
-  }
-  sun: {
-    elevation: number
-    azimuth: number
-    syncSunToLight: boolean
-  }
-  directionalLight: {
-    intensity: number
-    color: string
-    yaw: number
-    pitch: number
-  }
-  shadow: {
-    enabled: boolean
-    resolution: number
-    range: number
-    offsetX: number
-    offsetY: number
-    bias: number
-  }
-  environment: {
-    hdrPath: string
-    envIntensity: number
-    bgIntensity: number
-    exposure: number
-  }
+  /** 环境贴图总开关（关闭时背景用渐变底） */
+  envMapEnabled: boolean
   bloom: {
     enabled: boolean
     strength: number
     radius: number
     threshold: number
   }
+  dirLight: {
+    intensity: number
+    yaw: number
+    pitch: number
+    color: string
+    showPosHelper: boolean
+    showDirHelper: boolean
+    shadow: {
+      enabled: boolean
+      resolution: number
+      range: number
+      offsetX: number
+      offsetY: number
+      bias: number
+    }
+  }
+  envLight: {
+    /** HDR 环境贴图路径（相对于 public） */
+    hdrPath?: string
+    intensity: number
+    bgIntensity: number
+    exposure: number
+  }
 }
 
 /** 背景默认底色（无 HDR 且 bgInt=0 时使用） */
 const BG_COLOR = 0x1a1a2e
 
+/** 渐变背景颜色（环境贴图关闭时的回退背景，与 environment.js 一致） */
+const GRADIENT_COLORS = [
+  { stop: 0, color: '#46557a' },
+  { stop: 0.55, color: '#232e47' },
+  { stop: 1, color: '#0e1422' },
+]
+
+/** 默认 HDR 路径 */
+const DEFAULT_HDR_PATH = './assets/studio.exr'
+
 // ========== 环境管理器 ==========
 
 /**
- * 场景环境统一配置入口。
+ * 场景环境统一配置入口（v2，对齐 environment.js）。
  *
- * 管理天空（Sky.js）、HDR 环境贴图、光照（方向光 / 半球光 / 补光）、
- * 阴影、色调映射和环境/背景强度。
- * 读取 env-config.json，按标准顺序应用：
- * 天空参数 → 太阳位置 → 曝光 → PMREM 烘焙 → HDR 加载 → 天空可见性 →
- * 环境/背景强度 → 光照阴影。
+ * 管理 HDR 环境贴图、主方向光（含阴影）、环境/背景强度、
+ * 渐变背景回退、色调映射曝光和泛光参数。
  *
  * 用法：
  * ```ts
  * const env = new EnvironmentManager(scene, renderer)
- * scene.add(env.getSky())                       // 构造函数已创建 Sky
  * await env.applyFromUrl('./config/env-config.json')
  * ```
  */
 export class EnvironmentManager {
-  // ---- 天空与太阳 ----
-  private readonly sky: Sky
-  private readonly sunPosition = new THREE.Vector3()
-  /** HDR 环境贴图（EXR），为 PBR 材质提供环境反射与背景 */
-  private hdrTexture: THREE.Texture | null = null
-
   private readonly scene: THREE.Scene
   private readonly renderer: THREE.WebGLRenderer
+
+  /** HDR 环境贴图（EXR），为 PBR 材质提供环境反射与背景 */
+  private hdrTexture: THREE.Texture | null = null
+  /** 渐变背景纹理（envMap 关闭时的回退背景） */
+  private gradientBgTexture: THREE.CanvasTexture | null = null
+
+  /** 主方向光引用（供外部读取位置/阴影状态） */
+  private dirLight: THREE.DirectionalLight | null = null
+
+  /** 当前配置缓存（applyAllParams 后保留，供后续局部更新使用） */
+  private config: EnvConfig | null = null
 
   constructor(scene: THREE.Scene, renderer: THREE.WebGLRenderer) {
     this.scene = scene
     this.renderer = renderer
-
-    // 天空：Preetham 物理大气散射模型
-    this.sky = new Sky()
-    this.sky.scale.setScalar(45000)
-
-    // 默认天空参数（后续由 applyFromUrl 覆盖）
-    const u = this.sky.material.uniforms
-    u['turbidity'].value = 10
-    u['rayleigh'].value = 2
-    u['mieCoefficient'].value = 0.005
-    u['mieDirectionalG'].value = 0.8
-
-    this.sunPosition.set(0, 1, 0)
-    u['sunPosition'].value.copy(this.sunPosition)
-
-    // 初始 PMREM 烘焙（让场景立即有环境反射）
-    this.bakeSkyEnvMap()
   }
 
   // ========== 公共方法 ==========
@@ -105,43 +90,33 @@ export class EnvironmentManager {
   /**
    * 从 URL 加载 env-config.json 并应用全部环境配置。
    *
-   * 执行顺序（对齐 environment.js importConfig）：
-   * 1. 天空参数  2. 太阳位置  3. 色调映射 & 曝光
-   * 4. PMREM 烘焙  5. 天空可见性 & HDR 加载
-   * 6. 环境/背景强度  7. 光照 & 阴影
+   * 执行顺序（对齐 environment.js applyAllParams）：
+   * 1. 主方向光 + 阴影  2. 环境/背景强度  3. 曝光
    */
   async applyFromUrl(url: string): Promise<void> {
     const cfg = await this.loadConfig(url)
+    this.config = cfg
 
-    // ---- 1. 天空参数 ----
-    const u = this.sky.material.uniforms
-    u['turbidity'].value = cfg.sky.turbidity
-    u['rayleigh'].value = cfg.sky.rayleigh
-    u['mieCoefficient'].value = cfg.sky.mieCoefficient
-    u['mieDirectionalG'].value = cfg.sky.mieDirectionalG
+    // HDR 环境贴图（始终加载，显隐由 envMapEnabled / 强度控制）
+    const hdrPath = cfg.envLight.hdrPath ?? DEFAULT_HDR_PATH
+    await this.loadHdrEnvironment(hdrPath)
 
-    // ---- 2. 太阳位置 ----
-    const phi = THREE.MathUtils.degToRad(90 - cfg.sun.elevation)
-    const theta = THREE.MathUtils.degToRad(cfg.sun.azimuth)
-    this.sunPosition.setFromSphericalCoords(1, phi, theta)
-    u['sunPosition'].value.copy(this.sunPosition)
+    this.applyAllParams()
+  }
 
-    // ---- 3. 色调映射与曝光 ----
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = cfg.environment.exposure
+  /**
+   * 应用全部参数（可反复调用，对齐 environment.js applyAllParams）。
+   * 必须先调用 applyFromUrl 完成初始化。
+   */
+  applyAllParams(): void {
+    const cfg = this.config
+    if (!cfg) return
 
-    // ---- 4. 从天空烘焙 PMREM 环境贴图 ----
-    this.bakeSkyEnvMap()
+    // ---- 1. 主方向光 ----
+    this.setupDirLight(cfg)
 
-    // ---- 5. 天空可见性 ----
-    this.sky.visible = cfg.sky.enabled
-
-    if (!cfg.sky.enabled) {
-      await this.loadHdrEnvironment(cfg.environment.hdrPath)
-    }
-
-    // ---- 6. 环境强度 & 背景强度 ----
-    const envInt = cfg.environment.envIntensity
+    // ---- 2. 环境照明(IBL) ----
+    const envInt = cfg.envLight.intensity
     if (envInt > 0 && this.hdrTexture) {
       this.scene.environment = this.hdrTexture
       this.scene.environmentIntensity = envInt
@@ -149,11 +124,20 @@ export class EnvironmentManager {
       this.scene.environment = null
       this.scene.environmentIntensity = envInt
     } else {
+      this.scene.environment = null
       this.scene.environmentIntensity = 0
     }
 
-    const bgInt = cfg.environment.bgIntensity
-    if (bgInt > 0 && this.hdrTexture) {
+    // ---- 3. 背景 ----
+    // envMapEnabled 开关仅控制背景显隐，停用时换渐变底
+    const bgInt = cfg.envLight.bgIntensity
+    if (!cfg.envMapEnabled) {
+      this.scene.background = this.getGradientBackground()
+      this.scene.backgroundIntensity = 1
+    } else if (envInt === 0 && bgInt === 0) {
+      this.scene.background = this.getGradientBackground()
+      this.scene.backgroundIntensity = 1
+    } else if (bgInt > 0 && this.hdrTexture) {
       this.scene.background = this.hdrTexture
       this.scene.backgroundIntensity = bgInt
     } else if (bgInt > 0) {
@@ -164,21 +148,26 @@ export class EnvironmentManager {
       this.scene.backgroundIntensity = 0
     }
 
-    // ---- 7. 光照 & 阴影 ----
-    this.setupLights(cfg)
+    // ---- 4. 曝光 ----
+    this.renderer.toneMappingExposure = cfg.envLight.exposure
   }
 
-  /** 获取 Sky 实例（调用方需将其 add 到场景中） */
-  getSky(): Sky {
-    return this.sky
+  /** 获取主方向光引用（可能为 null，applyFromUrl 后才有值） */
+  getDirLight(): THREE.DirectionalLight | null {
+    return this.dirLight
   }
 
-  /** 当前太阳方向向量（供太阳同步方向光使用） */
-  getSunPosition(): THREE.Vector3 {
-    return this.sunPosition
+  /** 获取当前环境配置快照 */
+  getConfig(): EnvConfig | null {
+    return this.config
   }
 
-  /** 释放环境相关 GPU 资源（HDR 纹理、环境贴图） */
+  /** 获取泛光配置（供后期管线使用） */
+  getBloomConfig(): EnvConfig['bloom'] | null {
+    return this.config?.bloom ?? null
+  }
+
+  /** 释放环境相关 GPU 资源 */
   dispose(): void {
     if (this.scene.environment) {
       this.scene.environment.dispose()
@@ -188,12 +177,16 @@ export class EnvironmentManager {
       this.hdrTexture.dispose()
       this.hdrTexture = null
     }
+    if (this.gradientBgTexture) {
+      this.gradientBgTexture.dispose()
+      this.gradientBgTexture = null
+    }
   }
 
   // ========== 内部方法 ==========
 
-  /** 设置光照和阴影（移除旧灯光后重建） */
-  private setupLights(cfg: EnvConfig): void {
+  /** 设置主方向光 + 阴影（移除旧灯光后重建，保留半球光和补光） */
+  private setupDirLight(cfg: EnvConfig): void {
     // 移除场景中的旧灯光
     const toRemove: THREE.Object3D[] = []
     this.scene.traverse((obj) => {
@@ -203,46 +196,60 @@ export class EnvironmentManager {
       obj.parent?.remove(obj)
     })
 
-    // 主方向光
-    const mainLight = new THREE.DirectionalLight(
-      cfg.directionalLight.color,
-      cfg.directionalLight.intensity,
-    )
-    const yaw = THREE.MathUtils.degToRad(cfg.directionalLight.yaw)
-    const pitch = THREE.MathUtils.degToRad(cfg.directionalLight.pitch)
+    const dl = cfg.dirLight
+
+    // ---- 主方向光 ----
+    const mainLight = new THREE.DirectionalLight(dl.color, dl.intensity)
+    const yaw = THREE.MathUtils.degToRad(dl.yaw)
+    const pitch = THREE.MathUtils.degToRad(dl.pitch)
     mainLight.position.setFromSphericalCoords(200, Math.PI / 2 - pitch, yaw)
     mainLight.layers.enableAll()
     this.scene.add(mainLight)
+    this.dirLight = mainLight
 
-    // 太阳同步：方向光跟随太阳方向
-    if (cfg.sun.syncSunToLight) {
-      mainLight.position.copy(this.sunPosition).multiplyScalar(200)
-    }
-
-    // 阴影
-    if (cfg.shadow.enabled) {
+    // ---- 阴影 ----
+    const sh = dl.shadow
+    if (sh.enabled) {
       mainLight.castShadow = true
       this.renderer.shadowMap.enabled = true
-      mainLight.shadow.mapSize.set(cfg.shadow.resolution, cfg.shadow.resolution)
-      mainLight.shadow.camera.left = -cfg.shadow.range + cfg.shadow.offsetX
-      mainLight.shadow.camera.right = cfg.shadow.range + cfg.shadow.offsetX
-      mainLight.shadow.camera.top = cfg.shadow.range + cfg.shadow.offsetY
-      mainLight.shadow.camera.bottom = -cfg.shadow.range + cfg.shadow.offsetY
-      mainLight.shadow.bias = cfg.shadow.bias
+      mainLight.shadow.mapSize.set(sh.resolution, sh.resolution)
+      mainLight.shadow.camera.left = -sh.range + sh.offsetX
+      mainLight.shadow.camera.right = sh.range + sh.offsetX
+      mainLight.shadow.camera.top = sh.range + sh.offsetY
+      mainLight.shadow.camera.bottom = -sh.range + sh.offsetY
+      mainLight.shadow.bias = sh.bias
       mainLight.shadow.camera.updateProjectionMatrix()
     }
 
-    // 半球光（环境补光）
+    // ---- 半球光（环境补光） ----
     const hemiLight = new THREE.HemisphereLight('#dbeafe', '#020617', 0.6)
     hemiLight.position.set(0, 1, 0)
     hemiLight.layers.enableAll()
     this.scene.add(hemiLight)
 
-    // 补光（对侧柔光）
+    // ---- 补光（对侧柔光） ----
     const fillLight = new THREE.DirectionalLight('#93c5fd', 0.4)
     fillLight.position.set(-100, 60, -80)
     fillLight.layers.enableAll()
     this.scene.add(fillLight)
+  }
+
+  /** 生成渐变背景纹理（与 environment.js getGradientBackground 一致） */
+  private getGradientBackground(): THREE.CanvasTexture {
+    if (this.gradientBgTexture) return this.gradientBgTexture
+    const canvas = document.createElement('canvas')
+    canvas.width = 16
+    canvas.height = 512
+    const ctx2d = canvas.getContext('2d')!
+    const grad = ctx2d.createLinearGradient(0, 0, 0, 512)
+    for (const { stop, color } of GRADIENT_COLORS) {
+      grad.addColorStop(stop, color)
+    }
+    ctx2d.fillStyle = grad
+    ctx2d.fillRect(0, 0, 16, 512)
+    this.gradientBgTexture = new THREE.CanvasTexture(canvas)
+    this.gradientBgTexture.colorSpace = THREE.SRGBColorSpace
+    return this.gradientBgTexture
   }
 
   /** 加载 HDR 环境贴图（EXR 格式） */
@@ -263,32 +270,6 @@ export class EnvironmentManager {
         },
       )
     })
-  }
-
-  /** 从当前天空参数烘焙 PMREM 环境贴图，为 PBR 材质提供环境反射 */
-  private bakeSkyEnvMap(): void {
-    const pmrem = new THREE.PMREMGenerator(this.renderer)
-    pmrem.compileEquirectangularShader()
-
-    const skyScene = new THREE.Scene()
-    const skyCopy = new Sky()
-    const src = this.sky.material.uniforms
-    const dst = skyCopy.material.uniforms
-    dst['turbidity'].value = src['turbidity'].value
-    dst['rayleigh'].value = src['rayleigh'].value
-    dst['mieCoefficient'].value = src['mieCoefficient'].value
-    dst['mieDirectionalG'].value = src['mieDirectionalG'].value
-    dst['sunPosition'].value.copy(this.sunPosition)
-    skyScene.add(skyCopy)
-
-    const envMap = pmrem.fromScene(skyScene).texture
-
-    if (this.scene.environment) {
-      this.scene.environment.dispose()
-    }
-    this.scene.environment = envMap
-
-    pmrem.dispose()
   }
 
   /** 从 URL 加载 env-config.json */

@@ -1,41 +1,30 @@
 {
-  "version": 1,
-  "sky": {
-    "enabled": false,
-    "turbidity": 10,
-    "rayleigh": 2,
-    "mieCoefficient": 0.005,
-    "mieDirectionalG": 0.8
-  },
-  "sun": {
-    "elevation": 2,
-    "azimuth": 180,
-    "syncSunToLight": false
-  },
-  "directionalLight": {
-    "intensity": 1,
-    "color": "#ffffff",
-    "yaw": 45,
-    "pitch": 50
-  },
-  "shadow": {
-    "enabled": true,
-    "resolution": 4096,
-    "range": 62,
-    "offsetX": 0,
-    "offsetY": 0,
-    "bias": -0.001
-  },
-  "environment": {
-    "hdrPath": "./assets/studio.exr",
-    "envIntensity": 0.05,
-    "bgIntensity": 1,
-    "exposure": 1
-  },
+  "envMapEnabled": true,
   "bloom": {
     "enabled": false,
     "strength": 0.1,
     "radius": 0,
     "threshold": 0
+  },
+  "dirLight": {
+    "intensity": 1,
+    "yaw": 45,
+    "pitch": 50,
+    "color": "#ffffff",
+    "showPosHelper": false,
+    "showDirHelper": false,
+    "shadow": {
+      "enabled": true,
+      "resolution": 4096,
+      "range": 62,
+      "offsetX": 0,
+      "offsetY": 0,
+      "bias": -0.001
+    }
+  },
+  "envLight": {
+    "intensity": 1,
+    "bgIntensity": 1.5,
+    "exposure": 1
   }
 }

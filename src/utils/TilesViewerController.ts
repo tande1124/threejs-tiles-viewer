@@ -62,7 +62,6 @@ export class TilesViewerController {
   constructor(callbacks: ViewerCallbacks = {}) {
     // 环境管理器
     this.environment = new EnvironmentManager(this.scene, this.renderer)
-    this.scene.add(this.environment.getSky())
 
     this.tilesetRoot.name = 'tileset-root'
     this.markerRoot.name = 'marker-root'
