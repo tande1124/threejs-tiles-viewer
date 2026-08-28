@@ -28,9 +28,13 @@ export interface DefaultSceneConfig {
 /**
  * 默认地形瓦片集地址
  * 优先读取环境变量 VITE_DEFAULT_TILESET，未配置时回退到 public 目录下的本地数据
+ * 对于以 / 开头的绝对路径，自动拼接 BASE_URL 以支持子路径部署
  */
+const rawTilesetUrl = import.meta.env.VITE_DEFAULT_TILESET || './data/3dtiles/tileset.json'
 export const DEFAULT_TERRAIN_URL =
-    import.meta.env.VITE_DEFAULT_TILESET || './data/3dtiles/tileset.json'
+    rawTilesetUrl.startsWith('/') && !rawTilesetUrl.startsWith('//')
+      ? import.meta.env.BASE_URL.replace(/\/$/, '') + rawTilesetUrl
+      : rawTilesetUrl
 
 /**
  * 默认组合场景的数据源列表

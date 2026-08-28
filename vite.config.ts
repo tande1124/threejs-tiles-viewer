@@ -26,6 +26,7 @@ export default defineConfig(({ mode }) => {
   const proxyTarget = env.VITE_DEV_PROXY_TARGET?.trim()
 
   return {
+    base: mode === 'development' ? '/' : '/threeJs-3D/',
     plugins: [decodeTileUrls(), vue()],
     resolve: {
       alias: {
@@ -57,6 +58,7 @@ export default defineConfig(({ mode }) => {
     build: {
       target: 'esnext',
       sourcemap: true,
+      outDir: 'D:/System/threeJs-3D',
     },
   }
 })
