@@ -63,19 +63,19 @@ import type { GltfPickInfo } from '@/utils/GltfModelLoader'
 import PointLocatorForm from '@/components/PointLocatorForm.vue'
 import DetailPop from '@/components/DetailPop.vue'
 
-/**
- * jfs-bim.glb 的地理配准参数：已用「上水库库盆的实测位置
- * (113.632328°E, 35.614638°N, 1170m)」反算（对应模型中上水库库盆包围盒中心，
- * 非几何中心，坐标由现场实测提供）。
- * 每个 GLB 模型一份自己的配准参数，加载时自动定位。
- * 新模型可用控制台 __tilesViewer.calibrateFromAnchor(...) 反算。
- */
-const DEFAULT_GLTF_GEO = {
-  centralMeridianDeg: 114,
-  offsetX: 460019.023,
-  offsetY: 3939980.213,
-  offsetZ: 0,  // offsetZ 每 +1 → 模型整体抬高 1 米。当前是 -49.154：
-  verticalScale: 1,
+/** GLB 地理配准参数结构（来自 public/config/config.js） */
+interface GltfGeoConfig {
+  centralMeridianDeg: number
+  offsetX: number
+  offsetY: number
+  offsetZ: number
+  verticalScale: number
+}
+
+declare global {
+  interface Window {
+    __GLTF_GEO_CONFIG__?: GltfGeoConfig
+  }
 }
 
 /** 图层列表项（来自控制器 getLayerList） */
@@ -107,9 +107,9 @@ export default defineComponent({
     }
   },
   computed: {
-    /** 当前 GLB 模型的地理配准参数（传给详情弹窗换算经纬度） */
-    defaultGltfGeo(): typeof DEFAULT_GLTF_GEO {
-      return DEFAULT_GLTF_GEO
+    /** 当前 GLB 模型的地理配准参数（来自 public/config/config.js） */
+    defaultGltfGeo(): GltfGeoConfig | undefined {
+      return window.__GLTF_GEO_CONFIG__
     },
   },
   async mounted() {
@@ -184,7 +184,13 @@ export default defineComponent({
     async loadDefaultGltf() {
       if (!this.controller) return
       const loader = this.controller.getGltfModelLoader()
-      const model = await loader.loadGltf('./data/gltf/jfs-bim.glb', { geo: DEFAULT_GLTF_GEO })
+      const geoConfig = window.__GLTF_GEO_CONFIG__
+      if (!geoConfig) {
+        console.warn('[GLTF] 未找到地理配准配置 (public/config/config.js)，跳过 geo 定位。')
+      }
+      const model = await loader.loadGltf('./data/gltf/jfs-bim.glb', {
+        geo: geoConfig,
+      })
 
       // 材质配置：加载 material-state.json 并按 meshName 覆盖材质
       const matCfg = new MaterialConfigurator()
