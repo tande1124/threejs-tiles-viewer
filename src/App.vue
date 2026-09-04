@@ -4,7 +4,7 @@
   </main>
 </template>
 
-<script lang="ts">
+<script>
 import { defineComponent } from 'vue'
 import ThreeViewer from '@/components/index.vue'
 

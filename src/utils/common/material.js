@@ -1,110 +1,9 @@
 import * as THREE from 'three'
 
-// ========== 材质配置类型 ==========
-
-/** 纯色材质定义 */
-export interface SolidMaterialDef {
-  id?: string
-  color: string
-  name: string
-}
-
-/** 贴图材质定义 */
-export interface TexMaterialDef {
-  id?: string
-  color: string
-  name: string
-  textureDataURL: string | null
-  tileX: number
-  tileY: number
-  /** 粗糙度（默认 0.5） */
-  roughness?: number
-  /** 是否启用透明（如水面、栏杆等带 alpha 通道的贴图） */
-  transparent?: boolean
-}
-
-/** 金属材质定义 */
-export interface MetalMaterialDef {
-  id?: string
-  color: string
-  name: string
-  metalness: number
-  roughness: number
-}
-
-/** 半透明材质定义 */
-export interface TransMaterialDef {
-  id?: string
-  color: string
-  name: string
-  opacity: number
-}
-
-/** 其它材质定义（线框等） */
-export interface OtherMaterialDef {
-  id?: string
-  color: string
-  name: string
-  wireframe?: boolean
-}
-
-/** 玻璃材质定义（物理折射） */
-export interface GlassMaterialDef {
-  id?: string
-  color: string
-  name: string
-  /** 折射率（Index of Refraction） */
-  ior: number
-  opacity: number
-}
-
-/** 线框材质定义（边线覆盖层，非真实 Mesh 材质） */
-export interface WireframeMaterialDef {
-  id?: string
-  color: string
-  name: string
-  /** 边线检测角度阈值（度） */
-  edgeThreshold: number
-}
-
-/** 材质库分类结构 */
-export interface MaterialLibrary {
-  solid: SolidMaterialDef[]
-  tex: TexMaterialDef[]
-  metal: MetalMaterialDef[]
-  trans: TransMaterialDef[]
-  glass: GlassMaterialDef[]
-  wireframe: WireframeMaterialDef[]
-  other: OtherMaterialDef[]
-}
-
-export type MaterialType = keyof MaterialLibrary
-
-/** material-state.json 中的网格材质分配条目 */
-export interface MaterialStateEntry {
-  modelName: string
-  meshName: string
-  matKey: string
-}
-
-/** material-state.json 中的 HDR 环境元数据 */
-export interface HdrMeta {
-  __hdrMeta: true
-  envInt: number
-  bgInt: number
-  exposure: number
-}
-
-/** 材质状态文件解析结果 */
-export interface ParsedMaterialState {
-  entries: MaterialStateEntry[]
-  hdrMeta: HdrMeta | null
-}
-
 // ========== 预置材质库 ==========
 
-function createDefaultLibrary(): MaterialLibrary {
-  const lib: MaterialLibrary = {
+function createDefaultLibrary() {
+  const lib = {
     solid: [],
     tex: [],
     metal: [],
@@ -200,7 +99,7 @@ function createDefaultLibrary(): MaterialLibrary {
 
 // ========== 材质创建函数 ==========
 
-function createSolidMaterial(cfg: SolidMaterialDef): THREE.MeshStandardMaterial {
+function createSolidMaterial(cfg) {
   return new THREE.MeshStandardMaterial({
     name: cfg.name,
     color: cfg.color || '#ff6633',
@@ -209,10 +108,7 @@ function createSolidMaterial(cfg: SolidMaterialDef): THREE.MeshStandardMaterial 
   })
 }
 
-function createTexMaterial(
-  cfg: TexMaterialDef,
-  renderer?: THREE.WebGLRenderer,
-): THREE.MeshStandardMaterial {
+function createTexMaterial(cfg, renderer) {
   const mat = new THREE.MeshStandardMaterial({
     name: cfg.name,
     color: cfg.color || '#ffffff',
@@ -234,7 +130,7 @@ function createTexMaterial(
   return mat
 }
 
-function createMetalMaterial(cfg: MetalMaterialDef): THREE.MeshStandardMaterial {
+function createMetalMaterial(cfg) {
   return new THREE.MeshStandardMaterial({
     name: cfg.name,
     color: cfg.color || '#ff8800',
@@ -243,7 +139,7 @@ function createMetalMaterial(cfg: MetalMaterialDef): THREE.MeshStandardMaterial 
   })
 }
 
-function createTransMaterial(cfg: TransMaterialDef): THREE.MeshStandardMaterial {
+function createTransMaterial(cfg) {
   return new THREE.MeshStandardMaterial({
     name: cfg.name,
     color: cfg.color || '#44aaff',
@@ -254,7 +150,7 @@ function createTransMaterial(cfg: TransMaterialDef): THREE.MeshStandardMaterial 
   })
 }
 
-function createOtherMaterial(cfg: OtherMaterialDef): THREE.MeshStandardMaterial {
+function createOtherMaterial(cfg) {
   if (cfg.wireframe) {
     return new THREE.MeshStandardMaterial({
       name: cfg.name,
@@ -269,7 +165,7 @@ function createOtherMaterial(cfg: OtherMaterialDef): THREE.MeshStandardMaterial 
 }
 
 /** 创建玻璃材质（MeshPhysicalMaterial，物理折射 + 清漆层） */
-function createGlassMaterial(cfg: GlassMaterialDef): THREE.MeshPhysicalMaterial {
+function createGlassMaterial(cfg) {
   return new THREE.MeshPhysicalMaterial({
     name: cfg.name,
     color: cfg.color || '#88ddff',
@@ -291,7 +187,7 @@ function createGlassMaterial(cfg: GlassMaterialDef): THREE.MeshPhysicalMaterial 
  * 线框不是真实 Mesh 材质，而是边线覆盖层；
  * 返回配置标记对象，由应用层构建 EdgesGeometry + LineSegments。
  */
-function createWireframeMaterial(cfg: WireframeMaterialDef): { isWireframe: true; color: string; edgeThreshold: number } {
+function createWireframeMaterial(cfg) {
   return {
     isWireframe: true,
     color: cfg.color || '#00ffff',
@@ -313,23 +209,26 @@ function createWireframeMaterial(cfg: WireframeMaterialDef): { isWireframe: true
  * - 类型_索引 格式："tex_0"、"solid_3"
  */
 export class MaterialConfigurator {
-  private readonly lib: MaterialLibrary
-  private readonly renderer?: THREE.WebGLRenderer
-  /** ID → { type, idx } 映射表（材质编辑器导出的 mN 格式查找用） */
-  private readonly idMap = new Map<string, { type: MaterialType; idx: number }>()
+  lib
+  renderer
+  /** ID → { type, idx } 映射表 */
+  idMap = new Map()
 
-  constructor(renderer?: THREE.WebGLRenderer) {
+  /**
+   * @param {THREE.WebGLRenderer} [renderer]
+   */
+  constructor(renderer) {
     this.renderer = renderer
     this.lib = createDefaultLibrary()
     this.buildIdMap()
   }
 
   /** 遍历材质库，为每个条目的 id 字段建立快速查找索引 */
-  private buildIdMap(): void {
+  buildIdMap() {
     this.idMap.clear()
-    const types: MaterialType[] = ['solid', 'tex', 'metal', 'trans', 'glass', 'wireframe', 'other']
+    const types = ['solid', 'tex', 'metal', 'trans', 'glass', 'wireframe', 'other']
     for (const type of types) {
-      const items = this.lib[type] as Array<{ id?: string }>
+      const items = this.lib[type]
       for (let i = 0; i < items.length; i++) {
         const id = items[i].id
         if (id) this.idMap.set(id, { type, idx: i })
@@ -340,53 +239,47 @@ export class MaterialConfigurator {
   /**
    * 加载 material-state.json 并把材质覆盖应用到模型网格。
    *
-   * @param url    - 材质状态 JSON 文件路径（相对 public 目录）
-   * @param model  - 已加载的 GLB 模型根节点
-   * @param modelName - 模型逻辑名称，用于匹配 JSON 中的 modelName 字段
-   * @returns 解析后的 HDR 环境元数据（如有），可据此同步渲染器曝光等参数
+   * @param {string} url - 材质状态 JSON 文件路径（相对 public 目录）
+   * @param {THREE.Object3D} model - 已加载的 GLB 模型根节点
+   * @param {string} modelName - 模型逻辑名称，用于匹配 JSON 中的 modelName 字段
+   * @returns {Promise<{ hdrMeta: Object|null, appliedCount: number }>}
    */
-  async applyFromUrl(
-    url: string,
-    model: THREE.Object3D,
-    modelName: string,
-  ): Promise<{ hdrMeta: HdrMeta | null; appliedCount: number }> {
+  async applyFromUrl(url, model, modelName) {
     const response = await fetch(url)
     if (!response.ok) {
       console.warn(`[MaterialConfigurator] 无法加载材质状态: ${url} (${response.status})`)
       return { hdrMeta: null, appliedCount: 0 }
     }
-    const arr: unknown[] = await response.json()
+    const arr = await response.json()
     const { entries, hdrMeta } = this.parseStateArray(arr)
     const appliedCount = this.applyEntries(entries, model, modelName)
     return { hdrMeta, appliedCount }
   }
 
-  /**
-   * 解析 material-state.json 数组：分离网格材质条目和 HDR 元数据。
-   */
-  private parseStateArray(arr: unknown[]): ParsedMaterialState {
-    const entries: MaterialStateEntry[] = []
-    let hdrMeta: HdrMeta | null = null
+  /** 解析 material-state.json 数组：分离网格材质条目和 HDR 元数据。 */
+  parseStateArray(arr) {
+    const entries = []
+    let hdrMeta = null
 
     for (const item of arr) {
       if (!item || typeof item !== 'object') continue
-      const obj = item as Record<string, unknown>
+      const obj = item
 
       if (obj.__hdrMeta === true) {
         hdrMeta = {
           __hdrMeta: true,
-          envInt: (obj.envInt as number) ?? 0,
-          bgInt: (obj.bgInt as number) ?? 1,
-          exposure: (obj.exposure as number) ?? 1,
+          envInt: obj.envInt ?? 0,
+          bgInt: obj.bgInt ?? 1,
+          exposure: obj.exposure ?? 1,
         }
         continue
       }
 
       if (typeof obj.meshName === 'string' && typeof obj.modelName === 'string') {
         entries.push({
-          modelName: obj.modelName as string,
-          meshName: obj.meshName as string,
-          matKey: (obj.matKey as string) ?? '',
+          modelName: obj.modelName,
+          meshName: obj.meshName,
+          matKey: obj.matKey ?? '',
         })
       }
     }
@@ -394,15 +287,8 @@ export class MaterialConfigurator {
     return { entries, hdrMeta }
   }
 
-  /**
-   * 遍历模型，按 meshName 匹配并应用 matKey 对应的材质。
-   * 仅 matKey 非空的条目才会覆盖网格原始材质。
-   */
-  private applyEntries(
-    entries: MaterialStateEntry[],
-    model: THREE.Object3D,
-    modelName: string,
-  ): number {
+  /** 遍历模型，按 meshName 匹配并应用 matKey 对应的材质。 */
+  applyEntries(entries, model, modelName) {
     // 过滤当前模型的条目，且 matKey 非空
     const relevant = entries.filter(
       (e) => e.modelName === modelName && e.matKey,
@@ -410,14 +296,14 @@ export class MaterialConfigurator {
     if (relevant.length === 0) return 0
 
     // meshName → matKey 快速查找
-    const meshMap = new Map<string, string>()
+    const meshMap = new Map()
     for (const e of relevant) {
       meshMap.set(e.meshName, e.matKey)
     }
 
     let appliedCount = 0
     model.traverse((obj) => {
-      const mesh = obj as THREE.Mesh
+      const mesh = obj
       if (!mesh.isMesh || !mesh.name) return
 
       const matKey = meshMap.get(mesh.name.trim())
@@ -443,13 +329,10 @@ export class MaterialConfigurator {
   /**
    * 根据 matKey 创建材质实例。
    *
-   * 支持两种格式：
-   * - 材质编辑器 ID："m1"、"m46"
-   * - 类型_索引："tex_0"、"solid_3"
-   *
-   * 返回 null 表示 key 无效或材质库中不存在对应条目。
+   * @param {string} matKey
+   * @returns {THREE.Material | Object | null}
    */
-  getMaterialByKey(matKey: string): THREE.Material | Record<string, unknown> | null {
+  getMaterialByKey(matKey) {
     // 优先按 ID 格式查找（材质编辑器导出的 "mN" 格式）
     const idEntry = this.idMap.get(matKey)
     if (idEntry) {
@@ -460,7 +343,7 @@ export class MaterialConfigurator {
     const sepIdx = matKey.lastIndexOf('_')
     if (sepIdx < 0) return null
 
-    const type = matKey.slice(0, sepIdx) as MaterialType
+    const type = matKey.slice(0, sepIdx)
     const idx = parseInt(matKey.slice(sepIdx + 1), 10)
     if (isNaN(idx)) return null
 
@@ -470,38 +353,42 @@ export class MaterialConfigurator {
   /**
    * 按类型和索引创建材质实例。
    * 每次调用返回新实例（clone 语义），可安全赋给不同网格。
+   *
+   * @param {string} type
+   * @param {number} idx
+   * @returns {THREE.Material | Object | null}
    */
-  createMaterial(type: MaterialType, idx: number): THREE.Material | Record<string, unknown> | null {
+  createMaterial(type, idx) {
     const items = this.lib[type]
     if (!items || idx < 0 || idx >= items.length) return null
 
     switch (type) {
       case 'solid':
-        return createSolidMaterial(items[idx] as SolidMaterialDef)
+        return createSolidMaterial(items[idx])
       case 'tex':
-        return createTexMaterial(items[idx] as TexMaterialDef, this.renderer)
+        return createTexMaterial(items[idx], this.renderer)
       case 'metal':
-        return createMetalMaterial(items[idx] as MetalMaterialDef)
+        return createMetalMaterial(items[idx])
       case 'trans':
-        return createTransMaterial(items[idx] as TransMaterialDef)
+        return createTransMaterial(items[idx])
       case 'glass':
-        return createGlassMaterial(items[idx] as GlassMaterialDef)
+        return createGlassMaterial(items[idx])
       case 'wireframe':
-        return createWireframeMaterial(items[idx] as WireframeMaterialDef)
+        return createWireframeMaterial(items[idx])
       case 'other':
-        return createOtherMaterial(items[idx] as OtherMaterialDef)
+        return createOtherMaterial(items[idx])
       default:
         return null
     }
   }
 
   /** 获取材质库（只读引用，可直接读取各分类列表） */
-  getLibrary(): Readonly<MaterialLibrary> {
+  getLibrary() {
     return this.lib
   }
 
   /** 替换整个材质库（用于从外部导入材质定义） */
-  setLibrary(lib: MaterialLibrary): void {
+  setLibrary(lib) {
     Object.assign(this.lib, lib)
     this.buildIdMap()
   }

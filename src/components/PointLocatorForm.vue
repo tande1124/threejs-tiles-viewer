@@ -51,16 +51,15 @@
   </el-card>
 </template>
 
-<script lang="ts">
-import { defineComponent, type PropType } from 'vue'
-import type { PointMarkerRenderer } from '@/utils/PointMarkerRenderer'
+<script>
+import { defineComponent } from 'vue'
 
 export default defineComponent({
   name: 'PointLocatorForm',
   props: {
     /** 经纬度点位渲染器实例，由父组件通过 controller.getPointMarkerRenderer() 传入 */
     renderer: {
-      type: Object as PropType<PointMarkerRenderer | null>,
+      type: Object,
       default: null,
     },
   },
@@ -75,7 +74,7 @@ export default defineComponent({
   },
   methods: {
     /** 校验输入并直接调用 PointMarkerRenderer 渲染点位、飞行定位 */
-    async submitPoint(): Promise<void> {
+    async submitPoint() {
       const longitude = Number(this.longitudeInput)
       const latitude = Number(this.latitudeInput)
       const heightRaw = this.heightInput.trim()
@@ -118,7 +117,7 @@ export default defineComponent({
     },
 
     /** 清除当前点位 */
-    clearPoint(): void {
+    clearPoint() {
       this.validationError = ''
       this.renderer?.clear()
     },

@@ -3,27 +3,22 @@
  * - terrain: 地形基底（带 transform 参考、射线检测等）
  * - tileset: 独立的模型瓦片集
  */
-export type SceneSourceKind = 'terrain' | 'tileset'
 
 /**
  * 单个 3D Tiles 数据源的配置描述
  * 包含标识信息、种类以及远程或本地的 tileset.json 地址
+ * @typedef {Object} TilesetSourceConfig
+ * @property {string} id - 唯一标识符，用于 Map 索引和日志追踪
+ * @property {string} name - 可读名称，用于 UI 提示和错误消息
+ * @property {'terrain' | 'tileset'} kind - 数据源种类：地形基底或独立模型瓦片集
+ * @property {string} url - tileset.json 的资源地址（可以是相对路径或远程 URL）
  */
-export interface TilesetSourceConfig {
-  /** 唯一标识符，用于 Map 索引和日志追踪 */
-  id: string
-  /** 可读名称，用于 UI 提示和错误消息 */
-  name: string
-  /** 数据源种类：地形基底或独立模型瓦片集 */
-  kind: SceneSourceKind
-  /** tileset.json 的资源地址（可以是相对路径或远程 URL） */
-  url: string
-}
 
-/** 默认场景配置：包含一组预定义的数据源列表 */
-export interface DefaultSceneConfig {
-  sources: TilesetSourceConfig[]
-}
+/**
+ * 默认场景配置：包含一组预定义的数据源列表
+ * @typedef {Object} DefaultSceneConfig
+ * @property {TilesetSourceConfig[]} sources
+ */
 
 /**
  * 默认地形瓦片集地址
@@ -42,8 +37,9 @@ export const DEFAULT_TERRAIN_URL =
  * 约定：先加载 terrain 类型的地形基底（提供 transform 参考和射线检测能力），
  * 再加载独立的模型瓦片集（如施工辅助模型、枢纽工程结构模型）。
  * 每种数据源都有独立的 id、name、kind 和 url 字段。
+ * @type {TilesetSourceConfig[]}
  */
-const DEFAULT_SCENE_SOURCES: TilesetSourceConfig[] = [
+const DEFAULT_SCENE_SOURCES = [
   {
     id: 'terrain-base',
     name: '地形基底',
@@ -54,18 +50,18 @@ const DEFAULT_SCENE_SOURCES: TilesetSourceConfig[] = [
 
 /**
  * 获取默认地形瓦片集的资源地址
- * @returns 地形 tileset.json 的 URL
+ * @returns {string} 地形 tileset.json 的 URL
  */
-export function getDefaultTerrainUrl(): string {
+export function getDefaultTerrainUrl() {
   return DEFAULT_TERRAIN_URL
 }
 
 /**
  * 获取默认组合场景的完整配置
  * 返回一份浅拷贝，避免外部修改污染内部默认数据
- * @returns 包含所有预定义数据源的场景配置对象
+ * @returns {DefaultSceneConfig} 包含所有预定义数据源的场景配置对象
  */
-export function getDefaultSceneConfig(): DefaultSceneConfig {
+export function getDefaultSceneConfig() {
   return {
     sources: DEFAULT_SCENE_SOURCES.map((source) => ({ ...source })),
   }
@@ -73,8 +69,8 @@ export function getDefaultSceneConfig(): DefaultSceneConfig {
 
 /**
  * 获取默认场景中地形基底数据源的配置
- * @returns 第一个 kind === 'terrain' 的数据源配置，若无则返回 undefined
+ * @returns {TilesetSourceConfig | undefined} 第一个 kind === 'terrain' 的数据源配置，若无则返回 undefined
  */
-export function getTerrainSourceConfig(): TilesetSourceConfig | undefined {
+export function getTerrainSourceConfig() {
   return DEFAULT_SCENE_SOURCES.find((source) => source.kind === 'terrain')
 }

@@ -10,7 +10,7 @@ import vue from '@vitejs/plugin-vue'
 function decodeTileUrls() {
   return {
     name: 'decode-tile-urls',
-    configureServer(server: { middlewares: { use: (fn: (req: { url?: string }, res: unknown, next: () => void) => void) => void } }) {
+    configureServer(server) {
       server.middlewares.use((req, _res, next) => {
         if (req.url && req.url.includes('%')) {
           req.url = decodeURIComponent(req.url)

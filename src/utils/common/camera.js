@@ -4,23 +4,6 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 /** 相机最远缩小倍数（相对初始聚焦距离） */
 const ZOOM_LIMITS = {
   maxDistanceFactor: 1,
-} as const
-
-/** 飞行动画状态 */
-interface FlyAnimationState {
-  active: boolean
-  startTime: number
-  duration: number
-  fromPosition: THREE.Vector3
-  toPosition: THREE.Vector3
-  fromTarget: THREE.Vector3
-  toTarget: THREE.Vector3
-}
-
-/** CameraManager 回调配置 */
-export interface CameraManagerCallbacks {
-  /** 请求重新贴地点位（地形加载后刷新点位高程） */
-  onGrounding?: () => void
 }
 
 // ========== 相机管理器 ==========
@@ -32,27 +15,27 @@ export interface CameraManagerCallbacks {
  * 自动聚焦防抖（scheduleFit）及视口自适应（resize）。
  *
  * 用法：
- * ```ts
+ * ```js
  * const cam = new CameraManager(domElement, {
  *   onGrounding: () => pointMarkerRenderer.refreshGrounding(),
  * })
- * scene.add(cam.camera) // 相机本身无需加入场景，但可用于 TilesRenderer.setCamera
+ * scene.add(cam.camera)
  * cam.resize(width, height)
  * cam.fitToBox(sceneBounds)
  * ```
  */
 export class CameraManager {
   /** 主透视相机 */
-  readonly camera: THREE.PerspectiveCamera
+  camera
   /** 轨道控制器 */
-  readonly controls: OrbitControls
+  controls
 
   /** 用户手动操作后禁止后续自动聚焦覆盖视角 */
-  private hasSettledView = false
-  private fitTimerId = 0
-  private groundingTimerId = 0
+  hasSettledView = false
+  fitTimerId = 0
+  groundingTimerId = 0
 
-  private readonly flyAnimation: FlyAnimationState = {
+  flyAnimation = {
     active: false,
     startTime: 0,
     duration: 0,
@@ -62,9 +45,14 @@ export class CameraManager {
     toTarget: new THREE.Vector3(),
   }
 
-  private readonly callbacks: CameraManagerCallbacks
+  callbacks
 
-  constructor(domElement: HTMLElement, callbacks: CameraManagerCallbacks = {}) {
+  /**
+   * @param {HTMLElement} domElement
+   * @param {Object} [callbacks]
+   * @param {Function} [callbacks.onGrounding] - 请求重新贴地点位（地形加载后刷新点位高程）
+   */
+  constructor(domElement, callbacks = {}) {
     this.callbacks = callbacks
 
     this.camera = new THREE.PerspectiveCamera(45, 1, 1, 1e7)
@@ -88,8 +76,10 @@ export class CameraManager {
   /**
    * 同步相机宽高比与投影矩阵。
    * 控制器调用时传入容器尺寸，同时处理内相机与渲染目标的同步。
+   * @param {number} width
+   * @param {number} height
    */
-  resize(width: number, height: number): void {
+  resize(width, height) {
     this.camera.aspect = width / height
     this.camera.updateProjectionMatrix()
   }
@@ -99,8 +89,10 @@ export class CameraManager {
   /**
    * 根据包围盒调整相机位置、裁剪面和 OrbitControls 范围。
    * 返回 true 表示成功聚焦（包围盒非空）。
+   * @param {THREE.Box3} box
+   * @returns {boolean}
    */
-  fitToBox(box: THREE.Box3): boolean {
+  fitToBox(box) {
     if (box.isEmpty()) return false
 
     const size = box.getSize(new THREE.Vector3())
@@ -131,9 +123,9 @@ export class CameraManager {
    * 延迟触发相机自动聚焦（防抖 160ms）。
    * 用于 GLTF 加载等后续场景变更后自动重新聚焦。
    *
-   * @param computeBox - 返回当前场景合并包围盒的回调（控制器提供地形 + GLB 合并逻辑）
+   * @param {Function} computeBox - 返回当前场景合并包围盒的回调（控制器提供地形 + GLB 合并逻辑）
    */
-  scheduleFit(computeBox: () => THREE.Box3): void {
+  scheduleFit(computeBox) {
     if (this.hasSettledView) return
 
     window.clearTimeout(this.fitTimerId)
@@ -150,8 +142,9 @@ export class CameraManager {
   /**
    * 延迟重新贴地点位（防抖 160ms）。
    * 地形瓦片加载后，用最新几何体刷新点位高程。
+   * @param {number} [delay=160]
    */
-  scheduleGrounding(delay = 160): void {
+  scheduleGrounding(delay = 160) {
     window.clearTimeout(this.groundingTimerId)
     this.groundingTimerId = window.setTimeout(() => {
       this.groundingTimerId = 0
@@ -164,11 +157,11 @@ export class CameraManager {
   /**
    * 平滑飞行到目标点，保持当前观察角度。
    *
-   * @param target - 目标世界坐标
-   * @param markerScale - 点位标记缩放因子（决定飞行距离偏移，默认 10）
-   * @param duration - 飞行动画时长（ms，默认 900）
+   * @param {THREE.Vector3} target - 目标世界坐标
+   * @param {number} [markerScale=10] - 点位标记缩放因子（决定飞行距离偏移）
+   * @param {number} [duration=900] - 飞行动画时长（ms）
    */
-  flyTo(target: THREE.Vector3, markerScale = 10, duration = 900): void {
+  flyTo(target, markerScale = 10, duration = 900) {
     this.hasSettledView = true
 
     const distance = Math.max(markerScale * 12, 120)
@@ -188,9 +181,9 @@ export class CameraManager {
   /**
    * 每帧推进飞行动画（easeInOutCubic）。
    * 在渲染循环中调用；未激活时直接返回。
-   * @returns true 表示飞行动画仍在进行中（调用方据此决定是否跳过 controls.update）
+   * @returns {boolean} true 表示飞行动画仍在进行中
    */
-  tickFlyAnimation(): boolean {
+  tickFlyAnimation() {
     const anim = this.flyAnimation
     if (!anim.active) return false
 
@@ -213,26 +206,26 @@ export class CameraManager {
   }
 
   /** 飞行动画是否正在进行 */
-  isFlying(): boolean {
+  isFlying() {
     return this.flyAnimation.active
   }
 
   // ========== 状态查询 ==========
 
   /** 用户是否已手动操作过视角（手动操作后自动聚焦不再覆盖） */
-  isViewSettled(): boolean {
+  isViewSettled() {
     return this.hasSettledView
   }
 
   /** 重置 settled 状态（允许后续自动聚焦，如 GLTF 加载后） */
-  markUnsettled(): void {
+  markUnsettled() {
     this.hasSettledView = false
   }
 
   // ========== 生命周期 ==========
 
   /** 释放定时器与控制器资源 */
-  dispose(): void {
+  dispose() {
     window.clearTimeout(this.fitTimerId)
     window.clearTimeout(this.groundingTimerId)
     this.controls.dispose()

@@ -46,44 +46,28 @@
   </div>
 </template>
 
-<script lang="ts">
+<script>
 import { defineComponent } from 'vue'
-import { gaussKrugerInverse, type GeoReferenceParams } from '@/utils/common/geo-coordinate'
-import type { GltfPickInfo } from '@/utils/GltfModelLoader'
+import { gaussKrugerInverse } from '@/utils/common/geo-coordinate'
 
-/** 由模型局部坐标 + 配准参数换算出的地理坐标 */
-interface PickGeoInfo {
-  easting: number
-  northing: number
-  height: number
-  longitude: number
-  latitude: number
-}
-
-/**
- * GLB 部件信息弹窗。
- *
- * 固定显示在界面左侧的浮层（非居中模态、不跟随点击位置），
- * 纯文本展示部件位置详情，不展示模型。
- */
 export default defineComponent({
   name: 'DetailPop',
   props: {
     /** 点击拾取的部件详情（null 时不显示） */
     info: {
-      type: Object as () => GltfPickInfo | null,
+      type: Object,
       default: null,
     },
     /** 模型地理配准参数（用于换算 CGCS2000 平面坐标与经纬度） */
     geoParams: {
-      type: Object as () => GeoReferenceParams | null,
+      type: Object,
       default: null,
     },
   },
   emits: ['close'],
   computed: {
     /** 由模型局部坐标 + 配准参数换算 CGCS2000 平面坐标与经纬度 */
-    pickGeo(): PickGeoInfo | null {
+    pickGeo() {
       if (!this.info || !this.geoParams) return null
       const { localPosition } = this.info
       const { centralMeridianDeg, offsetX, offsetY, offsetZ, verticalScale = 1 } =
@@ -98,17 +82,17 @@ export default defineComponent({
   },
   methods: {
     /** 三维坐标格式化 */
-    fmtVec(v: { x: number; y: number; z: number }): string {
+    fmtVec(v) {
       return `(${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)})`
     },
 
     /** CGCS2000 平面坐标格式化 */
-    fmtPlane(geo: PickGeoInfo): string {
+    fmtPlane(geo) {
       return `东 ${geo.easting.toFixed(2)} m，北 ${geo.northing.toFixed(2)} m，高 ${geo.height.toFixed(2)} m`
     },
 
     /** 经纬度 / 高程格式化 */
-    fmtLonLat(geo: PickGeoInfo): string {
+    fmtLonLat(geo) {
       return `${geo.longitude.toFixed(6)}°, ${geo.latitude.toFixed(6)}°，高 ${geo.height.toFixed(2)} m`
     },
   },

@@ -54,37 +54,13 @@
   </div>
 </template>
 
-<script lang="ts">
+<script>
 import { defineComponent, markRaw } from 'vue'
 import { TilesViewerController } from '@/utils/TilesViewerController'
 import { getDefaultSceneConfig } from '@/utils/common/tileset'
 import { MaterialConfigurator } from '@/utils/common/material'
-import type { GltfPickInfo } from '@/utils/GltfModelLoader'
 import PointLocatorForm from '@/components/PointLocatorForm.vue'
 import DetailPop from '@/components/DetailPop.vue'
-
-/** GLB 地理配准参数结构（来自 public/config/config.js） */
-interface GltfGeoConfig {
-  centralMeridianDeg: number
-  offsetX: number
-  offsetY: number
-  offsetZ: number
-  verticalScale: number
-}
-
-declare global {
-  interface Window {
-    __GLTF_GEO_CONFIG__?: GltfGeoConfig
-  }
-}
-
-/** 图层列表项（来自控制器 getLayerList） */
-interface LayerItem {
-  id: string
-  name: string
-  kind: string
-  visible: boolean
-}
 
 export default defineComponent({
   name: 'ThreeTilesViewer',
@@ -94,21 +70,21 @@ export default defineComponent({
   },
   data() {
     return {
-      controller: null as TilesViewerController | null,
+      controller: null,
       defaultSceneConfig: getDefaultSceneConfig(),
       /** 点位定位表单是否展开 */
       showPointForm: false,
       /** 点击 GLB 部件拾取的详情（null 表示未选中/弹窗关闭） */
-      pickInfo: null as GltfPickInfo | null,
+      pickInfo: null,
       /** 3D Tiles 图层列表（含显隐状态） */
-      layers: [] as LayerItem[],
+      layers: [],
       /** 双相机透视渲染开关 */
       dualPass: true,
     }
   },
   computed: {
     /** 当前 GLB 模型的地理配准参数（来自 public/config/config.js） */
-    defaultGltfGeo(): GltfGeoConfig | undefined {
+    defaultGltfGeo() {
       return window.__GLTF_GEO_CONFIG__
     },
   },
@@ -122,7 +98,7 @@ export default defineComponent({
   methods: {
     /** 初始化 Three.js 场景并加载默认地形与模型 */
     async bootstrap() {
-      const viewerRoot = this.$refs.viewerRoot as HTMLElement | undefined
+      const viewerRoot = this.$refs.viewerRoot
 
       if (!viewerRoot) {
         return
@@ -158,7 +134,7 @@ export default defineComponent({
      * 点击 GLB 部件：更新弹窗详情。
      * info 为 null 表示点击空白，关闭弹窗。
      */
-    handleGltfPick(info: GltfPickInfo | null) {
+    handleGltfPick(info) {
       this.pickInfo = info ? markRaw(info) : null
       if (info) {
         console.log(
@@ -212,21 +188,21 @@ export default defineComponent({
     },
 
     /** 切换图层显隐 */
-    handleLayerToggle(id: string, value: string | number | boolean) {
+    handleLayerToggle(id, value) {
       const visible = Boolean(value)
       this.controller?.setLayerVisible(id, visible)
       this.refreshLayers()
     },
 
     /** 切换双相机透视渲染模式 */
-    handleDualPassToggle(value: string | number | boolean) {
+    handleDualPassToggle(value) {
       const enabled = Boolean(value)
       this.dualPass = enabled
       this.controller?.setDualPass(enabled)
     },
 
     /** 三维坐标格式化（控制台调试用） */
-    fmtVec(v: { x: number; y: number; z: number }): string {
+    fmtVec(v) {
       return `(${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)})`
     },
   },

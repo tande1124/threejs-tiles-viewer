@@ -4,67 +4,7 @@ import { disposeObject3D } from '@/utils/common/three-dispose'
 import {
   calibrateGeoReferenceFromAnchor,
   createGeoReferenceMatrix,
-  type GeoReferenceParams,
 } from '@/utils/common/geo-coordinate'
-
-/** GLTF/GLB 加载选项 */
-export interface GltfLoadOptions {
-  /** 是否把模型包围盒中心移到原点（默认 true，避免大坐标浮点精度问题） */
-  center?: boolean
-  /** 模型网格分配的图层编号（双相机模式下 1=内部层，默认不设置） */
-  layer?: number
-  /** 地理配准参数：把 GLB 局部坐标自动映射到 CGCS2000 真实坐标再进入场景坐标系 */
-  geo?: GeoReferenceParams
-}
-
-/** GLB 部件点击拾取信息 */
-export interface GltfPickInfo {
-  /** 选中的部件对象（命中网格向上最近的命名祖先，轮廓/半透明作用于整个部件） */
-  object: THREE.Object3D
-  /** 部件名称（对象本身无名字时取最近的有名字的祖先） */
-  name: string
-  /** 从模型根节点到命中对象的节点路径 */
-  path: string
-  /** 命中点世界坐标（场景坐标系，单位米） */
-  worldPosition: THREE.Vector3
-  /** 命中点在模型根节点局部坐标系下的坐标（单位米） */
-  localPosition: THREE.Vector3
-  /** 相机到命中点的距离（单位米） */
-  distance: number
-  /** 命中的模型根节点 */
-  model: THREE.Group
-}
-
-/** 查看器回调配置（由 TilesViewerController 构造时注入） */
-export interface ViewerCallbacks {
-  /** 点击 GLB 模型部件时的回调（info 为 null 表示点击未命中模型，可关闭弹窗） */
-  onGltfPick?: (
-    info: GltfPickInfo | null,
-    position: { x: number; y: number } | null,
-  ) => void
-}
-
-/** GltfModelLoader 的依赖注入 */
-export interface GltfModelLoaderDeps {
-  /** 模型挂载的目标场景 */
-  scene: THREE.Scene
-  /** WebGL 渲染器（用于获取最大各向异性等 GPU 能力） */
-  renderer?: THREE.WebGLRenderer
-  /** 可选：获取 ECEF → 场景坐标的变换矩阵（地理配准用） */
-  getEcefToSceneTransform?: () => THREE.Matrix4 | null
-  /** 可选：等待地形瓦片集就绪（地理配准用） */
-  whenTerrainReady?: () => Promise<void>
-  /**
-   * 可选：点击 GLB 部件时回调部件信息与点击位置（视口坐标）。
-   * info 为 null 表示点击未命中模型（可关闭弹窗），此时 position 也为 null。
-   */
-  onPick?: (
-    info: GltfPickInfo | null,
-    position: { x: number; y: number } | null,
-  ) => void
-  /** 可选：模型加载完成后请求控制器触发相机自动聚焦 */
-  onRequestFitCamera?: () => void
-}
 
 /**
  * GLTF/GLB 模型加载器。
@@ -78,32 +18,32 @@ export interface GltfModelLoaderDeps {
  */
 export class GltfModelLoader {
   /** 所有已加载模型的父级容器组（已加入 scene） */
-  readonly root: THREE.Group
+  root
 
-  private readonly deps: GltfModelLoaderDeps
-  private readonly loader: GLTFLoader
-  private readonly raycaster = new THREE.Raycaster()
+  deps
+  loader
+  raycaster = new THREE.Raycaster()
 
   // ---- 点击拾取状态 ----
-  private pickCamera: THREE.Camera | null = null
-  private pickDomElement: HTMLElement | null = null
-  private readonly pickPointerStart = new THREE.Vector2()
+  pickCamera = null
+  pickDomElement = null
+  pickPointerStart = new THREE.Vector2()
 
   // ---- 部件选中状态 ----
   /** 当前选中的部件对象（null 表示无选中） */
-  private highlightedObject: THREE.Object3D | null = null
+  highlightedObject = null
   /** 选中部件的半透明不透明度 */
-  private static readonly SELECTED_OPACITY = 0.5
+  static SELECTED_OPACITY = 0.5
   /** 选中前每个网格的原始材质（恢复时用） */
-  private readonly originalMaterials = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>()
+  originalMaterials = new Map()
   /** 选中时克隆出的临时材质（清除时释放） */
-  private readonly clonedMaterials = new Set<THREE.Material>()
+  clonedMaterials = new Set()
   /** 轮廓线容器（克隆网格 + 白色背面材质） */
-  private readonly outlineGroup = new THREE.Group()
+  outlineGroup = new THREE.Group()
   /** 当前 GLB 网格所在图层（双透模式=1，单层模式=0） */
-  private currentLayer = 1
+  currentLayer = 1
   /** 轮廓线共享材质：白色、反面绘制、略微放大 */
-  private readonly outlineMaterial = new THREE.MeshBasicMaterial({
+  outlineMaterial = new THREE.MeshBasicMaterial({
     color: 0xffffff,
     side: THREE.BackSide,
     depthWrite: false,
@@ -112,9 +52,18 @@ export class GltfModelLoader {
     polygonOffsetUnits: -1,
   })
   /** 部件放大比例（相对于部件包围盒） */
-  private static readonly OUTLINE_SCALE = 1.02
+  static OUTLINE_SCALE = 1.02
 
-  constructor(deps: GltfModelLoaderDeps) {
+  /**
+   * @param {Object} deps - 依赖注入
+   * @param {THREE.Scene} deps.scene - 模型挂载的目标场景
+   * @param {THREE.WebGLRenderer} [deps.renderer] - WebGL 渲染器
+   * @param {Function} [deps.getEcefToSceneTransform] - 获取 ECEF → 场景坐标的变换矩阵
+   * @param {Function} [deps.whenTerrainReady] - 等待地形瓦片集就绪
+   * @param {Function} [deps.onPick] - 点击 GLB 部件时回调
+   * @param {Function} [deps.onRequestFitCamera] - 模型加载完成后请求控制器触发相机自动聚焦
+   */
+  constructor(deps) {
     this.deps = deps
 
     this.root = new THREE.Group()
@@ -126,12 +75,15 @@ export class GltfModelLoader {
 
     this.loader = new GLTFLoader()
     // 射线拾取启用所有图层，确保 Layer 1（GLB 内部层）的网格也能被点击命中
-    // （双相机模式下 GLB 网格被设到 Layer 1，Raycaster 默认只检测 Layer 0）
     this.raycaster.layers.enableAll()
   }
 
-  /** 加载并渲染一个 GLTF/GLB 模型，返回模型根节点 */
-  async load(url: string, options: GltfLoadOptions = {}): Promise<THREE.Group> {
+  /** 加载并渲染一个 GLTF/GLB 模型，返回模型根节点
+   * @param {string} url
+   * @param {Object} [options={}]
+   * @returns {Promise<THREE.Group>}
+   */
+  async load(url, options = {}) {
     const { center = true, layer, geo } = options
 
     const model = (await this.loader.loadAsync(url)).scene
@@ -147,8 +99,8 @@ export class GltfModelLoader {
 
     // 分配到指定图层（双相机模式：Layer 1 = GLB 内部层）
     if (layer !== undefined) {
-      model.traverse((obj: THREE.Object3D) => {
-        if ((obj as THREE.Mesh).isMesh) obj.layers.set(layer)
+      model.traverse((obj) => {
+        if (obj.isMesh) obj.layers.set(layer)
       })
     }
 
@@ -164,19 +116,13 @@ export class GltfModelLoader {
   /**
    * 加载 GLTF/GLB 模型的高层封装
    *
-   * 在 load() 基础上补充双相机场景的默认行为：
-   * - 默认 layer=1（内相机层）
-   * - 提供 geo 配准时自动关闭 center（由地理矩阵定位）
-   * - fitCamera !== false 时通知控制器触发相机自动聚焦
-   *
-   * @param url - 模型资源地址
-   * @param options.fitCamera - 加载后是否触发相机聚焦（默认 true）
+   * @param {string} url - 模型资源地址
+   * @param {Object} [options={}]
+   * @param {boolean} [options.fitCamera=true] - 加载后是否触发相机聚焦
+   * @returns {Promise<THREE.Group>}
    */
-  async loadGltf(
-    url: string,
-    options: GltfLoadOptions & { fitCamera?: boolean } = {},
-  ): Promise<THREE.Group> {
-    const loadOptions: GltfLoadOptions = { layer: 1, ...options }
+  async loadGltf(url, options = {}) {
+    const loadOptions = { layer: 1, ...options }
     const model = options.geo
       ? await this.load(url, { ...loadOptions, center: false })
       : await this.load(url, loadOptions)
@@ -191,9 +137,10 @@ export class GltfModelLoader {
   /**
    * 启用点击拾取：在 domElement 上监听点击，命中 GLB 部件时通过
    * deps.onPick 回调部件信息，点击空白（未命中模型）时回调 null。
-   * 拖动旋转/平移不触发拾取。
+   * @param {THREE.Camera} camera
+   * @param {HTMLElement} domElement
    */
-  enablePicking(camera: THREE.Camera, domElement: HTMLElement): void {
+  enablePicking(camera, domElement) {
     if (this.pickDomElement === domElement) return
     this.disablePicking()
     this.pickCamera = camera
@@ -203,7 +150,7 @@ export class GltfModelLoader {
   }
 
   /** 停止点击拾取并释放监听 */
-  disablePicking(): void {
+  disablePicking() {
     if (this.pickDomElement) {
       this.pickDomElement.removeEventListener('pointerdown', this.handlePickPointerDown)
       this.pickDomElement.removeEventListener('click', this.handlePickClick)
@@ -215,9 +162,11 @@ export class GltfModelLoader {
   /**
    * 用归一化设备坐标（NDC，x/y ∈ -1 ~ 1，原点在画布中心）对已加载的 GLB
    * 模型做射线拾取，未命中任何部件时返回 null。
-   * 调试可用 __tilesViewer.pickGltfAt(x, y) 手动调用。
+   * @param {THREE.Camera} camera
+   * @param {THREE.Vector2} ndc
+   * @returns {Object|null}
    */
-  pick(camera: THREE.Camera, ndc: THREE.Vector2): GltfPickInfo | null {
+  pick(camera, ndc) {
     if (this.root.children.length === 0) return null
 
     camera.updateMatrixWorld()
@@ -232,7 +181,7 @@ export class GltfModelLoader {
     const model = this.findModelRoot(object)
     if (!model) return null
 
-    // 选中整个「部件」：取命名的最近祖先，保证轮廓/半透明作用于整个部件而非单个网格
+    // 选中整个「部件」：取命名的最近祖先
     const part = this.resolvePartObject(object, model)
 
     return {
@@ -249,15 +198,16 @@ export class GltfModelLoader {
   /**
    * 选中指定 GLB 部件：部件整体半透明 + 白色轮廓线。
    * 传 null 清除当前选中。
+   * @param {THREE.Object3D|null} object
    */
-  highlight(object: THREE.Object3D | null): void {
+  highlight(object) {
     this.clearHighlight()
     this.highlightedObject = object
     if (!object) return
 
     // ── 1. 部件整体半透明 ──
     object.traverse((child) => {
-      const mesh = child as THREE.Mesh
+      const mesh = child
       if (!mesh.isMesh) return
 
       const original = mesh.material
@@ -287,7 +237,7 @@ export class GltfModelLoader {
       .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z))
 
     object.traverse((child) => {
-      const mesh = child as THREE.Mesh
+      const mesh = child
       if (!mesh.isMesh) return
 
       const clone = mesh.clone()
@@ -306,21 +256,21 @@ export class GltfModelLoader {
 
   /**
    * 设置所有 GLB 网格与轮廓线的图层。
-   * 双透模式传 1（仅内相机可见），单层模式传 0（主相机可见）。
+   * @param {number} layer
    */
-  setLayer(layer: number): void {
+  setLayer(layer) {
     this.currentLayer = layer
     this.root.traverse((obj) => {
-      if ((obj as THREE.Mesh).isMesh) obj.layers.set(layer)
+      if (obj.isMesh) obj.layers.set(layer)
     })
     this.outlineGroup.layers.set(layer)
     this.outlineGroup.traverse((obj) => {
-      if ((obj as THREE.Mesh).isMesh) obj.layers.set(layer)
+      if (obj.isMesh) obj.layers.set(layer)
     })
   }
 
   /** 清除当前选中，恢复原始材质并移除轮廓网格 */
-  clearHighlight(): void {
+  clearHighlight() {
     // 恢复原始材质
     for (const [mesh, original] of this.originalMaterials) {
       mesh.material = original
@@ -338,13 +288,13 @@ export class GltfModelLoader {
     this.highlightedObject = null
   }
 
-  /** 当前选中的部件对象（null 表示无选中；供 OutlinePass 绘制白色轮廓） */
-  getHighlightedObject(): THREE.Object3D | null {
+  /** 当前选中的部件对象（null 表示无选中） */
+  getHighlightedObject() {
     return this.highlightedObject
   }
 
   /** 清除并释放所有已加载的 GLTF 模型 */
-  clear(): void {
+  clear() {
     this.clearHighlight()
     disposeObject3D(this.root)
     this.root.clear()
@@ -354,17 +304,21 @@ export class GltfModelLoader {
 
   /**
    * 用一个已知公共点反算 GLB 的地理配准参数（调试工具）。
-   * 输入「模型里某构件的局部坐标（加载后米值）+ 它在地形上的经纬度/高程」，
-   * 控制台打印可直接写进配置的 GeoReferenceParams。
+   * @param {{ x: number, y: number, z: number }} local
+   * @param {number} longitude
+   * @param {number} latitude
+   * @param {number} height
+   * @param {number} [verticalScale=1]
+   * @param {number} [centralMeridianDeg=114]
    */
   calibrateFromAnchor(
-    local: { x: number; y: number; z: number },
-    longitude: number,
-    latitude: number,
-    height: number,
+    local,
+    longitude,
+    latitude,
+    height,
     verticalScale = 1,
     centralMeridianDeg = 114,
-  ): GeoReferenceParams {
+  ) {
     const params = calibrateGeoReferenceFromAnchor(
       local,
       { longitude, latitude, height },
@@ -377,10 +331,7 @@ export class GltfModelLoader {
   }
 
   /** 按地理配准参数把 GLB 定位到场景（等待地形就绪后应用矩阵） */
-  private async applyGeoReference(
-    model: THREE.Object3D,
-    params: GeoReferenceParams,
-  ): Promise<void> {
+  async applyGeoReference(model, params) {
     await this.deps.whenTerrainReady?.()
     const ecefToScene = this.deps.getEcefToSceneTransform?.()
     if (!ecefToScene) {
@@ -395,12 +346,12 @@ export class GltfModelLoader {
   // ========== 纹理质量增强 ==========
 
   /** 提升模型纹理采样质量（各向异性 + 三线性过滤） */
-  private enhanceTextures(scene: THREE.Object3D): void {
+  enhanceTextures(scene) {
     const maxAnisotropy =
       this.deps.renderer?.capabilities.getMaxAnisotropy?.() ?? 16
 
     scene.traverse((obj) => {
-      const mesh = obj as THREE.Mesh
+      const mesh = obj
       if (!mesh.isMesh) return
 
       const material = mesh.material
@@ -411,10 +362,10 @@ export class GltfModelLoader {
         if (!mat) continue
 
         for (const key of Object.keys(mat)) {
-          const value = (mat as unknown as Record<string, unknown>)[key]
-          if (!value || !(value as THREE.Texture).isTexture) continue
+          const value = mat[key]
+          if (!value || !value.isTexture) continue
 
-          const texture = value as THREE.Texture
+          const texture = value
           texture.anisotropy = maxAnisotropy
 
           const mipCount = Array.isArray(texture.mipmaps) ? texture.mipmaps.length : 0
@@ -434,11 +385,11 @@ export class GltfModelLoader {
 
   // ========== 点击拾取实现 ==========
 
-  private readonly handlePickPointerDown = (event: PointerEvent): void => {
+  handlePickPointerDown = (event) => {
     this.pickPointerStart.set(event.clientX, event.clientY)
   }
 
-  private readonly handlePickClick = (event: MouseEvent): void => {
+  handlePickClick = (event) => {
     if (!this.pickCamera || !this.pickDomElement) return
 
     // 拖动旋转/平移后松开也会触发 click，位移超过阈值视为拖拽，不拾取
@@ -457,7 +408,7 @@ export class GltfModelLoader {
     this.deps.onPick?.(info, info ? { x: event.clientX, y: event.clientY } : null)
   }
 
-  private clientToNdc(event: MouseEvent, domElement: HTMLElement): THREE.Vector2 {
+  clientToNdc(event, domElement) {
     const rect = domElement.getBoundingClientRect()
     return new THREE.Vector2(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -465,9 +416,9 @@ export class GltfModelLoader {
     )
   }
 
-  /** 命中对象及其所有祖先是否可见（不可见对象不参与拾取） */
-  private isVisibleInTree(object: THREE.Object3D): boolean {
-    let node: THREE.Object3D | null = object
+  /** 命中对象及其所有祖先是否可见 */
+  isVisibleInTree(object) {
+    let node = object
     while (node) {
       if (node.visible === false) return false
       node = node.parent
@@ -475,18 +426,18 @@ export class GltfModelLoader {
     return true
   }
 
-  /** 找到命中对象所属的模型根节点（root 的直接子级） */
-  private findModelRoot(object: THREE.Object3D): THREE.Group | null {
-    let node: THREE.Object3D | null = object
+  /** 找到命中对象所属的模型根节点 */
+  findModelRoot(object) {
+    let node = object
     while (node && node.parent && node.parent !== this.root) {
       node = node.parent
     }
-    return node && node.parent === this.root ? (node as THREE.Group) : null
+    return node && node.parent === this.root ? node : null
   }
 
   /** 取部件名称：对象本身无名字时向上取最近的有名字的祖先 */
-  private resolveObjectName(object: THREE.Object3D): string {
-    let node: THREE.Object3D | null = object
+  resolveObjectName(object) {
+    let node = object
     while (node && node !== this.root) {
       if (node.name) return node.name
       node = node.parent
@@ -494,9 +445,9 @@ export class GltfModelLoader {
     return '(未命名部件)'
   }
 
-  /** 取「部件」对象：命中网格向上取最近的有名字的祖先（整个部件一起选中） */
-  private resolvePartObject(object: THREE.Object3D, model: THREE.Group): THREE.Object3D {
-    let node: THREE.Object3D | null = object
+  /** 取「部件」对象：命中网格向上取最近的有名字的祖先 */
+  resolvePartObject(object, model) {
+    let node = object
     while (node && node !== model) {
       if (node.name) return node
       node = node.parent
@@ -505,9 +456,9 @@ export class GltfModelLoader {
   }
 
   /** 生成「模型根 → 命中对象」的节点路径 */
-  private buildObjectPath(object: THREE.Object3D, model: THREE.Group): string {
-    const names: string[] = []
-    let node: THREE.Object3D | null = object
+  buildObjectPath(object, model) {
+    const names = []
+    let node = object
     while (node && node !== model) {
       names.unshift(node.name || '(未命名)')
       node = node.parent
